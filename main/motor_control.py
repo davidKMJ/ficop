@@ -14,11 +14,18 @@ ADDR_STS_PRESENT_POSITION = 56
 
 class MotorController:
     """
-    A class to control two SCServo motors using sync read/write operations.
+    A class to control four SCServo motors using sync read/write operations.
     """
 
     def __init__(
-        self, device_name, baudrate=1000000, servo1_id=30, servo2_id=31, protocol_end=0
+        self,
+        device_name,
+        baudrate=1000000,
+        servo1_id=30,
+        servo2_id=31,
+        servo3_id=80,
+        servo4_id=81,
+        protocol_end=0,
     ):
         """
         Initialize the MotorController.
@@ -28,12 +35,16 @@ class MotorController:
             baudrate (int): Communication baudrate (default: 1000000)
             servo1_id (int): ID of the first servo (default: 30)
             servo2_id (int): ID of the second servo (default: 31)
+            servo3_id (int): ID of the third servo (default: 80)
+            servo4_id (int): ID of the fourth servo (default: 81)
             protocol_end (int): Protocol end bit (0 for STS/SMS, 1 for SCS)
         """
         self.device_name = device_name
         self.baudrate = baudrate
         self.servo1_id = servo1_id
         self.servo2_id = servo2_id
+        self.servo3_id = servo3_id
+        self.servo4_id = servo4_id
         self.protocol_end = protocol_end
 
         # Initialize handlers
@@ -92,6 +103,16 @@ class MotorController:
                 self.portHandler.closePort()
                 return False
 
+            if not self.groupSyncRead.addParam(self.servo3_id):
+                print(f"[ID:{self.servo3_id:03d}] groupSyncRead addparam failed")
+                self.portHandler.closePort()
+                return False
+
+            if not self.groupSyncRead.addParam(self.servo4_id):
+                print(f"[ID:{self.servo4_id:03d}] groupSyncRead addparam failed")
+                self.portHandler.closePort()
+                return False
+
             self.is_connected = True
             return True
 
@@ -110,9 +131,11 @@ class MotorController:
         """
         if self.portHandler and self.is_connected:
             try:
-                # Disable torque on both servos
+                # Disable torque on all servos
                 self.set_torque_enable(self.servo1_id, False)
                 self.set_torque_enable(self.servo2_id, False)
+                self.set_torque_enable(self.servo3_id, False)
+                self.set_torque_enable(self.servo4_id, False)
 
                 # Clear sync read parameters
                 if self.groupSyncRead:
@@ -141,12 +164,17 @@ class MotorController:
         )
         if scs_comm_result != COMM_SUCCESS:
             raise RuntimeError(
-                f"Failed to set acceleration: {self.packetHandler.getTxRxResult(scs_comm_result)}"
+                f"[ID:{servo_id:03d}] Failed to set acceleration: {self.packetHandler.getTxRxResult(scs_comm_result)}"
             )
         elif scs_error != 0:
-            raise RuntimeError(
-                f"Servo error: {self.packetHandler.getRxPacketError(scs_error)}"
-            )
+            error_msg = self.packetHandler.getRxPacketError(scs_error)
+            if "Input voltage error" in error_msg:
+                raise RuntimeError(
+                    f"[ID:{servo_id:03d}] Hardware error - Input voltage error! "
+                    f"Check power supply voltage and current capacity. "
+                    f"Ensure the servo is receiving adequate power (typically 6-8.4V for most servos)."
+                )
+            raise RuntimeError(f"[ID:{servo_id:03d}] Servo error: {error_msg}")
 
     def set_speed(self, servo_id, speed_value):
         """
@@ -164,12 +192,17 @@ class MotorController:
         )
         if scs_comm_result != COMM_SUCCESS:
             raise RuntimeError(
-                f"Failed to set speed: {self.packetHandler.getTxRxResult(scs_comm_result)}"
+                f"[ID:{servo_id:03d}] Failed to set speed: {self.packetHandler.getTxRxResult(scs_comm_result)}"
             )
         elif scs_error != 0:
-            raise RuntimeError(
-                f"Servo error: {self.packetHandler.getRxPacketError(scs_error)}"
-            )
+            error_msg = self.packetHandler.getRxPacketError(scs_error)
+            if "Input voltage error" in error_msg:
+                raise RuntimeError(
+                    f"[ID:{servo_id:03d}] Hardware error - Input voltage error! "
+                    f"Check power supply voltage and current capacity. "
+                    f"Ensure the servo is receiving adequate power (typically 6-8.4V for most servos)."
+                )
+            raise RuntimeError(f"[ID:{servo_id:03d}] Servo error: {error_msg}")
 
     def set_torque_enable(self, servo_id, enable):
         """
@@ -188,16 +221,21 @@ class MotorController:
         )
         if scs_comm_result != COMM_SUCCESS:
             raise RuntimeError(
-                f"Failed to set torque: {self.packetHandler.getTxRxResult(scs_comm_result)}"
+                f"[ID:{servo_id:03d}] Failed to set torque: {self.packetHandler.getTxRxResult(scs_comm_result)}"
             )
         elif scs_error != 0:
-            raise RuntimeError(
-                f"Servo error: {self.packetHandler.getRxPacketError(scs_error)}"
-            )
+            error_msg = self.packetHandler.getRxPacketError(scs_error)
+            if "Input voltage error" in error_msg:
+                raise RuntimeError(
+                    f"[ID:{servo_id:03d}] Hardware error - Input voltage error! "
+                    f"Check power supply voltage and current capacity. "
+                    f"Ensure the servo is receiving adequate power (typically 6-8.4V for most servos)."
+                )
+            raise RuntimeError(f"[ID:{servo_id:03d}] Servo error: {error_msg}")
 
     def configure_servos(self, acc=0, speed=0):
         """
-        Configure both servos with acceleration and speed.
+        Configure all four servos with acceleration and speed.
 
         Args:
             acc (int): Acceleration value (default: 0)
@@ -214,13 +252,23 @@ class MotorController:
         self.set_acceleration(self.servo2_id, acc)
         self.set_speed(self.servo2_id, speed)
 
-    def set_goal_positions(self, position1, position2):
+        # Configure servo 3
+        self.set_acceleration(self.servo3_id, acc)
+        self.set_speed(self.servo3_id, speed)
+
+        # Configure servo 4
+        self.set_acceleration(self.servo4_id, acc)
+        self.set_speed(self.servo4_id, speed)
+
+    def set_goal_positions(self, position1, position2, position3, position4):
         """
-        Set goal positions for both servos simultaneously.
+        Set goal positions for all four servos simultaneously.
 
         Args:
             position1 (int): Goal position for servo 1
             position2 (int): Goal position for servo 2
+            position3 (int): Goal position for servo 3
+            position4 (int): Goal position for servo 4
         """
         if not self.is_connected:
             raise RuntimeError("Not connected. Call connect() first.")
@@ -242,6 +290,20 @@ class MotorController:
                 f"[ID:{self.servo2_id:03d}] groupSyncWrite addparam failed"
             )
 
+        # Prepare position 3
+        param_goal_position3 = [SCS_LOBYTE(position3), SCS_HIBYTE(position3)]
+        if not self.groupSyncWrite.addParam(self.servo3_id, param_goal_position3):
+            raise RuntimeError(
+                f"[ID:{self.servo3_id:03d}] groupSyncWrite addparam failed"
+            )
+
+        # Prepare position 4
+        param_goal_position4 = [SCS_LOBYTE(position4), SCS_HIBYTE(position4)]
+        if not self.groupSyncWrite.addParam(self.servo4_id, param_goal_position4):
+            raise RuntimeError(
+                f"[ID:{self.servo4_id:03d}] groupSyncWrite addparam failed"
+            )
+
         # Send sync write packet
         scs_comm_result = self.groupSyncWrite.txPacket()
         if scs_comm_result != COMM_SUCCESS:
@@ -254,10 +316,10 @@ class MotorController:
 
     def read_positions(self):
         """
-        Read present positions and speeds from both servos.
+        Read present positions and speeds from all four servos.
 
         Returns:
-            dict: Dictionary with keys 'servo1' and 'servo2', each containing:
+            dict: Dictionary with keys 'servo1', 'servo2', 'servo3', and 'servo4', each containing:
                 - 'position' (int): Present position
                 - 'speed' (int): Present speed
         """
@@ -274,6 +336,8 @@ class MotorController:
         result = {
             "servo1": {"position": 0, "speed": 0},
             "servo2": {"position": 0, "speed": 0},
+            "servo3": {"position": 0, "speed": 0},
+            "servo4": {"position": 0, "speed": 0},
         }
 
         # Read servo 1 data
@@ -300,17 +364,49 @@ class MotorController:
                 f"[ID:{self.servo2_id:03d}] groupSyncRead getdata failed"
             )
 
+        # Read servo 3 data
+        if self.groupSyncRead.isAvailable(self.servo3_id, ADDR_STS_PRESENT_POSITION, 4):
+            scs3_data = self.groupSyncRead.getData(
+                self.servo3_id, ADDR_STS_PRESENT_POSITION, 4
+            )
+            result["servo3"]["position"] = SCS_LOWORD(scs3_data)
+            result["servo3"]["speed"] = SCS_TOHOST(SCS_HIWORD(scs3_data), 15)
+        else:
+            raise RuntimeError(
+                f"[ID:{self.servo3_id:03d}] groupSyncRead getdata failed"
+            )
+
+        # Read servo 4 data
+        if self.groupSyncRead.isAvailable(self.servo4_id, ADDR_STS_PRESENT_POSITION, 4):
+            scs4_data = self.groupSyncRead.getData(
+                self.servo4_id, ADDR_STS_PRESENT_POSITION, 4
+            )
+            result["servo4"]["position"] = SCS_LOWORD(scs4_data)
+            result["servo4"]["speed"] = SCS_TOHOST(SCS_HIWORD(scs4_data), 15)
+        else:
+            raise RuntimeError(
+                f"[ID:{self.servo4_id:03d}] groupSyncRead getdata failed"
+            )
+
         return result
 
     def wait_for_positions(
-        self, goal_position1, goal_position2, threshold=20, timeout=None
+        self,
+        goal_position1,
+        goal_position2,
+        goal_position3,
+        goal_position4,
+        threshold=20,
+        timeout=None,
     ):
         """
-        Wait until both servos reach their goal positions.
+        Wait until all four servos reach their goal positions.
 
         Args:
             goal_position1 (int): Goal position for servo 1
             goal_position2 (int): Goal position for servo 2
+            goal_position3 (int): Goal position for servo 3
+            goal_position4 (int): Goal position for servo 4
             threshold (int): Position threshold to consider reached (default: 20)
             timeout (float): Maximum time to wait in seconds (None for no timeout)
 
@@ -326,8 +422,15 @@ class MotorController:
 
             pos1_diff = abs(goal_position1 - positions["servo1"]["position"])
             pos2_diff = abs(goal_position2 - positions["servo2"]["position"])
+            pos3_diff = abs(goal_position3 - positions["servo3"]["position"])
+            pos4_diff = abs(goal_position4 - positions["servo4"]["position"])
 
-            if pos1_diff <= threshold and pos2_diff <= threshold:
+            if (
+                pos1_diff <= threshold
+                and pos2_diff <= threshold
+                and pos3_diff <= threshold
+                and pos4_diff <= threshold
+            ):
                 return True
 
             if timeout is not None and (time.time() - start_time) > timeout:
