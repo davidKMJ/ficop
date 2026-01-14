@@ -10,7 +10,7 @@ import pandas as pd
 
 # Configuration
 # Motor
-MOTOR_DEVICE = "COM3"
+MOTOR_DEVICE = "COM4"
 MOTOR_BAUDRATE = 1000000
 SERVO1_ID = 30
 SERVO2_ID = 31
@@ -100,8 +100,8 @@ def get_mean_oscilloscope_value(channel, wait_for_oscilloscope_settle):
     time.sleep(wait_for_oscilloscope_settle)
     while True:
         data = oscilloscope.read_values(channel=channel)
-        if len(data[1]) >= 3:
-            y_values = data[1][-3:]
+        if len(data[1]) >= 5:
+            y_values = data[1][-5:]
             mean = np.mean(y_values)
             return mean
         time.sleep(0.01)
@@ -129,7 +129,7 @@ def optimization(
     # Record time
     start_time = time.time()
     # Manual search
-    manual_best_pos, manual_best_y = None, -np.inf
+    manual_best_pos = None
 
     if verbose:
         print("Starting manual search...")
@@ -143,20 +143,21 @@ def optimization(
                 positions["servo3"]["position"],
                 positions["servo4"]["position"],
             ]
-            low_position_1 = manual_best_pos[0] - int(500 / (1.8**i))
-            high_position_1 = manual_best_pos[0] + int(500 / (1.8**i))
-            low_position_2 = manual_best_pos[1] - int(500 / (1.8**i))
-            high_position_2 = manual_best_pos[1] + int(500 / (1.8**i))
-            low_position_3 = manual_best_pos[2] - int(500 / (1.8**i))
-            high_position_3 = manual_best_pos[2] + int(500 / (1.8**i))
-            low_position_4 = manual_best_pos[3] - int(500 / (1.8**i))
-            high_position_4 = manual_best_pos[3] + int(500 / (1.8**i))
+            low_position_1 = manual_best_pos[0] - int(500 / (2**i))
+            high_position_1 = manual_best_pos[0] + int(500 / (2**i))
+            low_position_2 = manual_best_pos[1] - int(500 / (2**i))
+            high_position_2 = manual_best_pos[1] + int(500 / (2**i))
+            low_position_3 = manual_best_pos[2] - int(500 / (2**i))
+            high_position_3 = manual_best_pos[2] + int(500 / (2**i))
+            low_position_4 = manual_best_pos[3] - int(500 / (2**i))
+            high_position_4 = manual_best_pos[3] + int(500 / (2**i))
             if verbose:
                 print(
                     f"iter {i+1:02d} | pos1={manual_best_pos[0]:4d}, pos2={manual_best_pos[1]:4d}, pos3={manual_best_pos[2]:4d}, pos4={manual_best_pos[3]:4d}"
                 )
 
-            for pos1 in range(low_position_1, high_position_1, max(1, 10//(i+1))):
+            manual_best_y = -np.inf
+            for pos1 in range(low_position_1, high_position_1, max(1, int(20 / (2**i)))):
                 set_motor_positions(
                     pos1,
                     manual_best_pos[1],
@@ -171,7 +172,8 @@ def optimization(
                     manual_best_y = mean
                     manual_best_pos[0] = pos1
 
-            for pos2 in range(low_position_2, high_position_2, max(1, 10//(i+1))):
+            manual_best_y = -np.inf
+            for pos2 in range(low_position_2, high_position_2, max(1, int(20 / (2**i)))):
                 set_motor_positions(
                     manual_best_pos[0],
                     pos2,
@@ -186,7 +188,8 @@ def optimization(
                     manual_best_y = mean
                     manual_best_pos[1] = pos2
 
-            for pos3 in range(low_position_3, high_position_3, max(1, 10//(i+1))):
+            manual_best_y = -np.inf
+            for pos3 in range(low_position_3, high_position_3, max(1, int(20 / (2**i)))):
                 set_motor_positions(
                     manual_best_pos[0],
                     manual_best_pos[1],
@@ -201,7 +204,8 @@ def optimization(
                     manual_best_y = mean
                     manual_best_pos[2] = pos3
 
-            for pos4 in range(low_position_4, high_position_4, max(1, 10//(i+1))):
+            manual_best_y = -np.inf
+            for pos4 in range(low_position_4, high_position_4, max(1, int(20 / (2**i)))):
                 set_motor_positions(
                     manual_best_pos[0],
                     manual_best_pos[1],
@@ -328,8 +332,8 @@ def main():
     # manual_search_iterations_space = list(np.arange(3, 6, 2))
     # optimization_iterations_space = list(np.arange(40, 100, 20))
     # optimization_initial_points_space = list(np.arange(5, 20, 5))
-    position_threshold_space = [2]
-    wait_for_oscilloscope_settle_space = [0.05]
+    position_threshold_space = [3]
+    wait_for_oscilloscope_settle_space = [0.1]
     manual_search_iterations_space = [5]
     optimization_iterations_space = [100]
     optimization_initial_points_space = [20]
@@ -380,7 +384,6 @@ def main():
     print("Motor controller connected and configured")
 
     for params in parameter_grid:
-        set_motor_positions(1500, 2800, 2000, 1800, params["position_threshold"])
         best_y, duration = optimization(
             params["position_threshold"],
             params["wait_for_oscilloscope_settle"],
