@@ -1,404 +1,382 @@
 import numpy as np
-from skopt import Optimizer
-from skopt.space import Real
-from sklearn.model_selection import ParameterGrid
 from oscilloscope_reader import OscilloscopeReader
 from motor_control import MotorController
 import time
-import csv
-import pandas as pd
 
 # Configuration
 # Motor
-MOTOR_DEVICE = "COM4"
+MOTOR_DEVICE = "COM3"
 MOTOR_BAUDRATE = 1000000
-SERVO1_ID = 30
-SERVO2_ID = 31
-SERVO3_ID = 80
-SERVO4_ID = 81
+SERVO_IDS = [30, 31, 80, 81]
 MIN_POSITION = 500
 MAX_POSITION = 3500
+THRESHOLD = 2  # Threshold for the motor controller
 
 # Oscilloscope
 OSCILLOSCOPE_CHANNEL = None
-OSCILLOSCOPE_SCALING_OFFSET = 8000000
-OSCILLOSCOPE_SCALING_FACTOR = 10000000
+WAIT_FOR_OSCILLOSCOPE = 0.1  # Seconds
+
+# Value scaling
+VALUE_OFFSET = 8000000
+VALUE_SCALING_FACTOR = 10000000
+
+# Optimization
+NO_UPDATE_COUNT_THRESHOLD = 3
+MANUAL_SEARCH_ITERATIONS = 0
+ONE_KNOB_SEARCH_ITERATIONS = 0
+TWO_KNOB_SEARCH_ITERATIONS = 6
+FINE_MANUAL_SEARCH_ITERATIONS = 3
 
 # Global instances (initialized in main)
 oscilloscope = None
 motor_controller = None
 
 
-def blackbox(pos1, pos2, pos3, pos4, position_threshold, wait_for_oscilloscope_settle):
+def setup_oscilloscope():
     """
-    Black-box function that:
-    1. Sets motor positions
-    2. Waits for motors to settle
-    3. Reads most recent oscilloscope data
-    4. Calculates signal quality metric (peak-to-peak amplitude)
-
-    Args:
-        pos1 (float): Motor 1 position (will be converted to int)
-        pos2 (float): Motor 2 position (will be converted to int)
-        pos3 (float): Motor 3 position (will be converted to int)
-        pos4 (float): Motor 4 position (will be converted to int)
-        position_threshold: Position threshold for the motor controller
-        wait_for_oscilloscope_settle: Time to wait for the oscilloscope to settle
-
-    Returns:
-        float: Signal quality metric (peak-to-peak amplitude) to maximize
+    Initialize the oscilloscope.
     """
-    set_motor_positions(pos1, pos2, pos3, pos4, position_threshold)
-    mean = get_mean_oscilloscope_value(
-        OSCILLOSCOPE_CHANNEL, wait_for_oscilloscope_settle
-    )
+    global oscilloscope
 
-    return (mean - OSCILLOSCOPE_SCALING_OFFSET) / OSCILLOSCOPE_SCALING_FACTOR
-
-
-def set_motor_positions(pos1, pos2, pos3, pos4, threshold):
-    """
-    Set and wait for motor positions.
-    Args:
-        motor_controller: MotorController instance
-        pos1: Motor 1 position
-        pos2: Motor 2 position
-        pos3: Motor 3 position
-        pos4: Motor 4 position
-        threshold: Position threshold for the motor controller
-    """
-    if (
-        pos1 < MIN_POSITION
-        or pos1 > MAX_POSITION
-        or pos2 < MIN_POSITION
-        or pos2 > MAX_POSITION
-        or pos3 < MIN_POSITION
-        or pos3 > MAX_POSITION
-        or pos4 < MIN_POSITION
-        or pos4 > MAX_POSITION
-    ):
-        return
-    pos1 = int(np.clip(pos1, MIN_POSITION, MAX_POSITION))
-    pos2 = int(np.clip(pos2, MIN_POSITION, MAX_POSITION))
-    pos3 = int(np.clip(pos3, MIN_POSITION, MAX_POSITION))
-    pos4 = int(np.clip(pos4, MIN_POSITION, MAX_POSITION))
-
-    motor_controller.set_goal_positions(pos1, pos2, pos3, pos4)
-    motor_controller.wait_for_positions(
-        pos1, pos2, pos3, pos4, threshold=threshold, timeout=5.0
-    )
-
-
-def get_mean_oscilloscope_value(channel, wait_for_oscilloscope_settle):
-    """
-    Get the mean of the last 10 oscilloscope values.
-    Args:
-        channel: Oscilloscope channel
-    Returns:
-        float: Mean of the last 10 oscilloscope values
-    """
-    time.sleep(wait_for_oscilloscope_settle)
-    while True:
-        data = oscilloscope.read_values(channel=channel)
-        if len(data[1]) >= 5:
-            y_values = data[1][-5:]
-            mean = np.mean(y_values)
-            return mean
-        time.sleep(0.01)
-
-
-def optimization(
-    position_threshold,
-    wait_for_oscilloscope_settle,
-    manual_search_iterations,
-    optimization_iterations,
-    optimization_initial_points,
-    verbose=True,
-):
-    """
-    Optimize the motor positions using a manual search and an optimization algorithm.
-    Args:
-        oscilloscope: OscilloscopeReader instance
-        motor_controller: MotorController instance
-        wait_for_oscilloscope_settle: Time to wait for the oscilloscope to settle
-        manual_search_iterations: Number of iterations for the manual search
-        optimization_iterations: Number of iterations for the optimization
-        optimization_initial_points: Number of initial points for the optimization
-        position_threshold: Position threshold for the motor controller
-    """
-    # Record time
-    start_time = time.time()
-    # Manual search
-    manual_best_pos = None
-
-    if verbose:
-        print("Starting manual search...")
-        print("=" * 60)
-    try:
-        for i in range(manual_search_iterations):
-            positions = motor_controller.read_positions()
-            manual_best_pos = [
-                positions["servo1"]["position"],
-                positions["servo2"]["position"],
-                positions["servo3"]["position"],
-                positions["servo4"]["position"],
-            ]
-            low_position_1 = manual_best_pos[0] - int(500 / (2**i))
-            high_position_1 = manual_best_pos[0] + int(500 / (2**i))
-            low_position_2 = manual_best_pos[1] - int(500 / (2**i))
-            high_position_2 = manual_best_pos[1] + int(500 / (2**i))
-            low_position_3 = manual_best_pos[2] - int(500 / (2**i))
-            high_position_3 = manual_best_pos[2] + int(500 / (2**i))
-            low_position_4 = manual_best_pos[3] - int(500 / (2**i))
-            high_position_4 = manual_best_pos[3] + int(500 / (2**i))
-            if verbose:
-                print(
-                    f"iter {i+1:02d} | pos1={manual_best_pos[0]:4d}, pos2={manual_best_pos[1]:4d}, pos3={manual_best_pos[2]:4d}, pos4={manual_best_pos[3]:4d}"
-                )
-
-            manual_best_y = -np.inf
-            for pos1 in range(low_position_1, high_position_1, max(1, int(20 / (2**i)))):
-                set_motor_positions(
-                    pos1,
-                    manual_best_pos[1],
-                    manual_best_pos[2],
-                    manual_best_pos[3],
-                    position_threshold,
-                )
-                mean = get_mean_oscilloscope_value(
-                    OSCILLOSCOPE_CHANNEL, wait_for_oscilloscope_settle
-                )
-                if mean > manual_best_y:
-                    manual_best_y = mean
-                    manual_best_pos[0] = pos1
-
-            manual_best_y = -np.inf
-            for pos2 in range(low_position_2, high_position_2, max(1, int(20 / (2**i)))):
-                set_motor_positions(
-                    manual_best_pos[0],
-                    pos2,
-                    manual_best_pos[2],
-                    manual_best_pos[3],
-                    position_threshold,
-                )
-                mean = get_mean_oscilloscope_value(
-                    OSCILLOSCOPE_CHANNEL, wait_for_oscilloscope_settle
-                )
-                if mean > manual_best_y:
-                    manual_best_y = mean
-                    manual_best_pos[1] = pos2
-
-            manual_best_y = -np.inf
-            for pos3 in range(low_position_3, high_position_3, max(1, int(20 / (2**i)))):
-                set_motor_positions(
-                    manual_best_pos[0],
-                    manual_best_pos[1],
-                    pos3,
-                    manual_best_pos[3],
-                    position_threshold,
-                )
-                mean = get_mean_oscilloscope_value(
-                    OSCILLOSCOPE_CHANNEL, wait_for_oscilloscope_settle
-                )
-                if mean > manual_best_y:
-                    manual_best_y = mean
-                    manual_best_pos[2] = pos3
-
-            manual_best_y = -np.inf
-            for pos4 in range(low_position_4, high_position_4, max(1, int(20 / (2**i)))):
-                set_motor_positions(
-                    manual_best_pos[0],
-                    manual_best_pos[1],
-                    manual_best_pos[2],
-                    pos4,
-                    position_threshold,
-                )
-                mean = get_mean_oscilloscope_value(
-                    OSCILLOSCOPE_CHANNEL, wait_for_oscilloscope_settle
-                )
-                if mean > manual_best_y:
-                    manual_best_y = mean
-                    manual_best_pos[3] = pos4
-
-            set_motor_positions(
-                manual_best_pos[0],
-                manual_best_pos[1],
-                manual_best_pos[2],
-                manual_best_pos[3],
-                position_threshold,
-            )
-
-    except KeyboardInterrupt:
-        if verbose:
-            print("\n\nManual search interrupted by user")
-        else:
-            print("\n\nInterrupted by user")
-
-    except Exception as e:
-        if verbose:
-            print(f"\n\nError during manual search: {e}")
-        else:
-            print(f"\n\nError: {e}")
-        import traceback
-
-        traceback.print_exc()
-
-    # Optimization
-    positions = motor_controller.read_positions()
-    low_position_1 = positions["servo1"]["position"] - 5
-    high_position_1 = positions["servo1"]["position"] + 5
-    low_position_2 = positions["servo2"]["position"] - 5
-    high_position_2 = positions["servo2"]["position"] + 5
-    low_position_3 = positions["servo3"]["position"] - 5
-    high_position_3 = positions["servo3"]["position"] + 5
-    low_position_4 = positions["servo4"]["position"] - 5
-    high_position_4 = positions["servo4"]["position"] + 5
-
-    space = [
-        Real(low_position_1, high_position_1, name="motor_pos1"),
-        Real(low_position_2, high_position_2, name="motor_pos2"),
-        Real(low_position_3, high_position_3, name="motor_pos3"),
-        Real(low_position_4, high_position_4, name="motor_pos4"),
-    ]
-
-    opt = Optimizer(
-        dimensions=space,
-        base_estimator="GP",
-        acq_func="PI",
-        n_initial_points=optimization_initial_points,
-        random_state=0,
-    )
-
-    best_pos, best_y = None, -np.inf
-
-    if verbose:
-        print("\nStarting optimization...")
-        print("=" * 60)
-
-    try:
-        for t in range(optimization_iterations):
-            x = opt.ask()
-            y = blackbox(
-                x[0], x[1], x[2], x[3], 1, wait_for_oscilloscope_settle
-            )
-            opt.tell(x, -y)
-
-            if y > best_y:
-                best_pos, best_y = x, y
-
-            if verbose:
-                print(
-                    f"iter {t+1:02d} | pos1={int(x[0]):4d}, pos2={int(x[1]):4d}, pos3={int(x[2]):4d}, pos4={int(x[3]):4d} | "
-                    f"metric={y:.6f} | best={best_y:.6f}"
-                )
-
-        if verbose:
-            print("\n" + "=" * 60)
-            print("Optimization complete!")
-            print("\nBest found:")
-            print(f"Motor Position 1: {int(best_pos[0])}")
-            print(f"Motor Position 2: {int(best_pos[1])}")
-            print(f"Motor Position 3: {int(best_pos[2])}")
-            print(f"Motor Position 4: {int(best_pos[3])}")
-            print(f"Best Metric (Mean): {best_y:.6f}")
-
-        # Move motor to best position
-        set_motor_positions(
-            best_pos[0], best_pos[1], best_pos[2], best_pos[3], 1
-        )
-        end_time = time.time()
-        return best_y, end_time - start_time
-
-    except KeyboardInterrupt:
-        if verbose:
-            print("\n\nOptimization interrupted by user")
-        else:
-            print("\n\nInterrupted by user")
-
-    except Exception as e:
-        if verbose:
-            print(f"\n\nError during optimization: {e}")
-        else:
-            print(f"\n\nError: {e}")
-        import traceback
-
-        traceback.print_exc()
-
-
-def main():
-    global oscilloscope, motor_controller
-    # position_threshold_space = list(np.arange(1, 10, 3))
-    # wait_for_oscilloscope_settle_space = list(np.arange(0.01, 0.15, 0.05))
-    # manual_search_iterations_space = list(np.arange(3, 6, 2))
-    # optimization_iterations_space = list(np.arange(40, 100, 20))
-    # optimization_initial_points_space = list(np.arange(5, 20, 5))
-    position_threshold_space = [3]
-    wait_for_oscilloscope_settle_space = [0.1]
-    manual_search_iterations_space = [5]
-    optimization_iterations_space = [100]
-    optimization_initial_points_space = [20]
-    parameter_grid = ParameterGrid(
-        {
-            "position_threshold": position_threshold_space,
-            "wait_for_oscilloscope_settle": wait_for_oscilloscope_settle_space,
-            "manual_search_iterations": manual_search_iterations_space,
-            "optimization_iterations": optimization_iterations_space,
-            "optimization_initial_points": optimization_initial_points_space,
-        }
-    )
-
-    # Initialize oscilloscope
+    print("=" * 60)
     print("Initializing oscilloscope...")
+    print("=" * 60)
     oscilloscope = OscilloscopeReader()
     if not oscilloscope.connect():
-        print("Failed to connect to oscilloscope")
-        return
+        if motor_controller:
+            motor_controller.disconnect()
+        raise RuntimeError("Failed to connect to oscilloscope")
 
     # Configure oscilloscope
     oscilloscope.configure(
         memory_depth=12000,
         waveform_mode="NORM",
         waveform_format="WORD",
-        time_mode="ROLL",
+        time_mode="YT",
         start_acquisition=True,
     )
-    print("Oscilloscope connected and configured")
+    print("\n\nOscilloscope connected and configured")
 
-    # Initialize motor controller
+
+def setup_motor_controller():
+    """
+    Initialize the motor controller.
+    """
+    global motor_controller
+
+    print("=" * 60)
     print("Initializing motor controller...")
+    print("=" * 60)
     motor_controller = MotorController(
         device_name=MOTOR_DEVICE,
+        servo_ids=SERVO_IDS,
         baudrate=MOTOR_BAUDRATE,
-        servo1_id=SERVO1_ID,
-        servo2_id=SERVO2_ID,
-        servo3_id=SERVO3_ID,
-        servo4_id=SERVO4_ID,
     )
     if not motor_controller.connect():
-        print("Failed to connect to motor controller")
-        oscilloscope.disconnect()
-        return
+        if oscilloscope:
+            oscilloscope.disconnect()
+        raise RuntimeError("Failed to connect to motor controller")
 
     # Configure servos
     motor_controller.configure_servos(acc=0, speed=0)
-    print("Motor controller connected and configured")
+    print("\n\nMotor controller connected and configured")
 
-    for params in parameter_grid:
-        best_y, duration = optimization(
-            params["position_threshold"],
-            params["wait_for_oscilloscope_settle"],
-            params["manual_search_iterations"],
-            params["optimization_iterations"],
-            params["optimization_initial_points"],
+
+def disconnect_devices():
+    """
+    Disconnect the oscilloscope and motor controller.
+    """
+    print("=" * 60)
+    print("Disconnecting devices...")
+    print("=" * 60)
+    if oscilloscope:
+        oscilloscope.disconnect()
+    if motor_controller:
+        motor_controller.disconnect()
+    print("\n\nDisconnected from oscilloscope and motor controller")
+
+
+def set_motor_positions(positions):
+    """
+    Set and wait for motor positions.
+    Args:
+        positions: List of motor positions
+        threshold: Position threshold for the motor controller
+    """
+    if len(positions) != len(SERVO_IDS):
+        raise ValueError(
+            f"Number of positions ({len(positions)}) must match number of servos ({len(SERVO_IDS)})"
         )
 
-    print(f"Duration: {duration:.2f} seconds")
+    # Check and clip positions
+    for i, pos in enumerate(positions):
+        if pos < MIN_POSITION or pos > MAX_POSITION:
+            return
+        positions[i] = int(np.clip(pos, MIN_POSITION, MAX_POSITION))
+
+    motor_controller.set_goal_positions(positions)
+    motor_controller.wait_for_positions(positions, THRESHOLD, timeout=5.0)
+
+
+def get_value():
+    """
+    Get the scaled value of the mean of the oscilloscope values.
+    Returns:
+        float: Value
+    """
+    time.sleep(WAIT_FOR_OSCILLOSCOPE)
+    mean = np.mean(oscilloscope.read_values(channel=OSCILLOSCOPE_CHANNEL)[1])
+    return (mean - VALUE_OFFSET) / VALUE_SCALING_FACTOR
+
+
+def blackbox(positions):
+    """
+    Black-box function that:
+    1. Sets motor positions
+    2. Gets the value
+
+    Args:
+        positions (list): List of motor positions (will be converted to int)
+
+    Returns:
+        float: Value to maximize
+    """
+    set_motor_positions(positions)
+    value = get_value()
+
+    return value
+
+
+def manual_search(servo_idx, margin, step, is_fine_search=False, verbose=True):
+    """
+    Manual search for the motor positions.
+    Args:
+        servo_idx: Index of the servo to search
+        margin: Margin for the search
+        step: Step size for the search
+        verbose: Whether to print verbose output
+    """
+    positions = motor_controller.read_positions()
+    manual_best_pos = positions["positions"].copy()
+    manual_best_value = -np.inf
+    low_position = positions["positions"][servo_idx] - margin
+    high_position = positions["positions"][servo_idx] + margin
+    no_update_count = 0
+    for i, pos in enumerate(range(low_position, high_position, step)):
+        test_positions = positions["positions"].copy()
+        test_positions[servo_idx] = pos
+        set_motor_positions(test_positions)
+        value = blackbox(test_positions)
+        if verbose:
+            print(
+                f"{'fine-' if is_fine_search else ''}manual: {servo_idx} | iter: {i} | position: {pos} | value: {value} | best value: {manual_best_value}"
+            )
+        if value > manual_best_value:
+            manual_best_value = value
+            manual_best_pos[servo_idx] = pos
+        else:
+            no_update_count += 1
+        if not is_fine_search and no_update_count > NO_UPDATE_COUNT_THRESHOLD:
+            break
+    return blackbox(manual_best_pos)
+
+
+def one_knob_search(servo_idx, step, verbose=True):
+    """
+    One-knob search for the motor positions.
+    Args:
+        servo_idx: Index of the servo to search
+        step: Step size for the search
+        verbose: Whether to print verbose output
+    """
+
+    def get_direction():
+        positions = motor_controller.read_positions()
+        current_position = positions["positions"].copy()
+        current_position[servo_idx] += step
+        df_dx = blackbox(current_position)
+        current_position[servo_idx] -= 2 * step
+        df_dx -= blackbox(current_position)
+        df_dx /= 2 * step
+        return df_dx / np.linalg.norm(df_dx)
+
+    positions = motor_controller.read_positions()
+    one_knob_best_pos = positions["positions"].copy()
+    one_knob_best_value = -np.inf
+    direction = get_direction()
+    no_update_count = 0
+    iter = 0
+    print(direction)
+    while no_update_count < NO_UPDATE_COUNT_THRESHOLD:
+        positions = motor_controller.read_positions()
+        test_positions = positions["positions"].copy()
+        test_positions[servo_idx] += step * direction
+        value = blackbox(test_positions)
+        if value > one_knob_best_value:
+            one_knob_best_value = value
+            one_knob_best_pos[servo_idx] = test_positions[servo_idx]
+        else:
+            no_update_count += 1
+        if verbose:
+            print(
+                f"one-knob: {servo_idx} | iter: {iter} | position: {test_positions[servo_idx]} | value: {value} | best value: {one_knob_best_value}"
+            )
+        iter += 1
+    return blackbox(one_knob_best_pos)
+
+
+def two_knob_search(
+    servo_idx1, servo_idx2, step, direction_update_interval=None, verbose=True
+):
+    """
+    Two-knob search for the motor positions.
+    Args:
+        servo_idx1: Index of the first servo to search
+        servo_idx2: Index of the second servo to search
+        step: Step size for the search
+        verbose: Whether to print verbose output
+    """
+
+    def get_direction():
+        beginning_positions = motor_controller.read_positions()
+        current_position = beginning_positions["positions"].copy()
+        current_position[servo_idx1] += step
+        df_dx = blackbox(current_position)
+        current_position[servo_idx1] -= 2 * step
+        df_dx -= blackbox(current_position)
+        df_dx /= 2 * step
+        current_position[servo_idx1] += step
+        current_position[servo_idx2] += step
+        df_dy = blackbox(current_position)
+        current_position[servo_idx2] -= 2 * step
+        df_dy -= blackbox(current_position)
+        df_dy /= 2 * step
+        return np.array([df_dx, df_dy]) / np.linalg.norm(np.array([df_dx, df_dy]))
+
+    positions = motor_controller.read_positions()
+    two_knob_best_pos = positions["positions"].copy()
+    two_knob_best_value = -np.inf
+    direction = get_direction()
+    no_update_count = 0
+    iter = 0
+    while no_update_count < NO_UPDATE_COUNT_THRESHOLD:
+        positions = motor_controller.read_positions()
+        test_positions = positions["positions"].copy()
+        test_positions[servo_idx1] += step * direction[0]
+        test_positions[servo_idx2] += step * direction[1]
+        set_motor_positions(test_positions)
+        value = blackbox(test_positions)
+        if value > two_knob_best_value:
+            two_knob_best_value = value
+            two_knob_best_pos[servo_idx1] = test_positions[servo_idx1]
+            two_knob_best_pos[servo_idx2] = test_positions[servo_idx2]
+        else:
+            no_update_count += 1
+        if verbose:
+            print(
+                f"two-knob: {servo_idx1}, {servo_idx2} | iter: {iter} | position: {test_positions[servo_idx1]}, {test_positions[servo_idx2]} | value: {value} | best value: {two_knob_best_value}"
+            )
+        iter += 1
+        if direction_update_interval and iter % direction_update_interval == 0:
+            direction = get_direction()
+    return blackbox(two_knob_best_pos)
+
+
+def optimization(verbose=True):
+    """
+    Optimize the motor positions.
+    Args:
+        verbose: Whether to print verbose output
+    """
+    start_time = time.time()
+
+    # Manual search
+    if MANUAL_SEARCH_ITERATIONS > 0:
+        print("=" * 60)
+        print("Starting manual search...")
+        print("=" * 60)
+
+        for i in range(MANUAL_SEARCH_ITERATIONS):
+            blackbox(motor_controller.read_positions()["positions"])
+            for servo_idx in range(len(SERVO_IDS)):
+                manual_search(servo_idx, int(500 / (2**i)), 10, verbose=verbose)
+        print("\n\nManual search done")
+
+    # One-knob search
+    if ONE_KNOB_SEARCH_ITERATIONS > 0:
+        print("=" * 60)
+        print("Starting one-knob search...")
+        print("=" * 60)
+        for i in range(ONE_KNOB_SEARCH_ITERATIONS):
+            for servo_idx in range(len(SERVO_IDS)):
+                one_knob_search(servo_idx, 10, verbose=verbose)
+        print("\n\nOne-knob search done")
+
+    # Two-knob search
+    if TWO_KNOB_SEARCH_ITERATIONS > 0:
+        print("=" * 60)
+        print("Starting two-knob search...")
+        print("=" * 60)
+        two_knob_pairs = [(0, 3), (1, 2)]
+        for i in range(TWO_KNOB_SEARCH_ITERATIONS):
+            current_value = blackbox(motor_controller.read_positions()["positions"])
+            max_value = current_value
+            for pair in two_knob_pairs:
+                max_value = max(
+                    max_value,
+                    two_knob_search(
+                        pair[0],
+                        pair[1],
+                        10,
+                        direction_update_interval=5,
+                        verbose=verbose,
+                    ),
+                )
+            if max_value < current_value * 1.05:
+                print("\n\nEarly stopping condition met")
+                break
+        print("\n\nTwo-knob search done")
+
+    # Fine-Manual search
+    if FINE_MANUAL_SEARCH_ITERATIONS > 0:
+        print("=" * 60)
+        print("Starting fine-manual search...")
+        print("=" * 60)
+        for i in range(FINE_MANUAL_SEARCH_ITERATIONS):
+            current_value = blackbox(motor_controller.read_positions()["positions"])
+            max_value = current_value
+            for servo_idx in range(len(SERVO_IDS)):
+                max_value = max(
+                    max_value,
+                    manual_search(
+                        servo_idx, 40, 2, is_fine_search=True, verbose=verbose
+                    ),
+                )
+            if max_value < current_value * 1.01:
+                print("\n\nEarly stopping condition met")
+                break
+        print("\n\nFine-manual search done")
+
+        duration = time.time() - start_time
+        return duration
+
+
+def main():
+    global oscilloscope, motor_controller
+
+    setup_oscilloscope()
+    setup_motor_controller()
+
+    duration = optimization(verbose=True)
+
+    print(f"\n\nDuration: {duration:.2f} seconds")
 
     # Disconnect devices
-    print("\nDisconnecting devices...")
-    motor_controller.disconnect()
-    oscilloscope.disconnect()
+    disconnect_devices()
+
+    print("=" * 60)
     print("Done")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

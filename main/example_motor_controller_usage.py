@@ -7,10 +7,7 @@ from motor_control import MotorController
 # Configuration
 DEVICENAME = "COM4"  # Change to your port
 BAUDRATE = 1000000
-SERVO1_ID = 30
-SERVO2_ID = 31
-SERVO3_ID = 80
-SERVO4_ID = 81
+SERVO_IDS = [30, 31, 80, 81]  # List of servo IDs: [servo1, servo2, servo3, servo4]
 
 # Position limits
 MIN_POSITION = 100
@@ -21,11 +18,8 @@ def main():
     # Create motor controller instance
     controller = MotorController(
         device_name=DEVICENAME,
+        servo_ids=SERVO_IDS,
         baudrate=BAUDRATE,
-        servo1_id=SERVO1_ID,
-        servo2_id=SERVO2_ID,
-        servo3_id=SERVO3_ID,
-        servo4_id=SERVO4_ID,
     )
 
     try:
@@ -40,27 +34,21 @@ def main():
 
         # Example 1: Set goal positions and read current positions
         print("\n--- Example 1: Setting goal positions ---")
-        controller.set_goal_positions(MAX_POSITION, MIN_POSITION, MAX_POSITION, MIN_POSITION)
+        goal_positions = [MAX_POSITION, MIN_POSITION, MAX_POSITION, MIN_POSITION]
+        controller.set_goal_positions(goal_positions)
 
         # Read positions
         positions = controller.read_positions()
-        print(
-            f"Servo 1 - Position: {positions['servo1']['position']}, Speed: {positions['servo1']['speed']}"
-        )
-        print(
-            f"Servo 2 - Position: {positions['servo2']['position']}, Speed: {positions['servo2']['speed']}"
-        )
-        print(
-            f"Servo 3 - Position: {positions['servo3']['position']}, Speed: {positions['servo3']['speed']}"
-        )
-        print(
-            f"Servo 4 - Position: {positions['servo4']['position']}, Speed: {positions['servo4']['speed']}"
-        )
+        for idx, servo_id in enumerate(SERVO_IDS):
+            servo_key = f"servo{idx+1}"
+            print(
+                f"Servo {idx+1} (ID:{servo_id:03d}) - Position: {positions[servo_key]['position']}, Speed: {positions[servo_key]['speed']}"
+            )
 
         # Example 2: Wait for servos to reach goal positions
         print("\n--- Example 2: Waiting for servos to reach goal ---")
-        controller.set_goal_positions(MAX_POSITION, MIN_POSITION, MAX_POSITION, MIN_POSITION)
-        if controller.wait_for_positions(MAX_POSITION, MIN_POSITION, MAX_POSITION, MIN_POSITION, threshold=20):
+        controller.set_goal_positions(goal_positions)
+        if controller.wait_for_positions(goal_positions, threshold=20):
             print("All servos reached their goal positions!")
         else:
             print("Timeout waiting for servos to reach goal positions")
@@ -69,21 +57,15 @@ def main():
         print("\n--- Example 3: Reading positions multiple times ---")
         for i in range(5):
             positions = controller.read_positions()
-            print(
-                f"Read {i+1}: Servo1={positions['servo1']['position']}, Servo2={positions['servo2']['position']}, "
-                f"Servo3={positions['servo3']['position']}, Servo4={positions['servo4']['position']}"
-            )
+            pos_list = positions["positions"]
+            pos_str = ", ".join([f"Servo{j+1}={pos_list[j]}" for j in range(len(pos_list))])
+            print(f"Read {i+1}: {pos_str}")
 
         # Example 4: Individual servo control
         print("\n--- Example 4: Individual servo configuration ---")
-        controller.set_acceleration(SERVO1_ID, 0)
-        controller.set_speed(SERVO1_ID, 0)
-        controller.set_acceleration(SERVO2_ID, 0)
-        controller.set_speed(SERVO2_ID, 0)
-        controller.set_acceleration(SERVO3_ID, 0)
-        controller.set_speed(SERVO3_ID, 0)
-        controller.set_acceleration(SERVO4_ID, 0)
-        controller.set_speed(SERVO4_ID, 0)
+        for servo_id in SERVO_IDS:
+            controller.set_acceleration(servo_id, 0)
+            controller.set_speed(servo_id, 0)
 
     except Exception as e:
         print(f"Error: {e}")
@@ -101,20 +83,20 @@ def example_with_context_manager():
     print("\n--- Example with context manager ---")
 
     try:
-        with MotorController(DEVICENAME, BAUDRATE, SERVO1_ID, SERVO2_ID, SERVO3_ID, SERVO4_ID) as controller:
+        with MotorController(DEVICENAME, SERVO_IDS, BAUDRATE) as controller:
             # Configure servos
             controller.configure_servos(acc=0, speed=0)
 
             # Set and wait for positions
-            controller.set_goal_positions(MIN_POSITION, MIN_POSITION, MIN_POSITION, MIN_POSITION)
-            controller.wait_for_positions(MIN_POSITION, MIN_POSITION, MIN_POSITION, MIN_POSITION)
+            goal_positions = [MIN_POSITION] * len(SERVO_IDS)
+            controller.set_goal_positions(goal_positions)
+            controller.wait_for_positions(goal_positions)
 
             # Read final positions
             positions = controller.read_positions()
-            print(
-                f"Final positions - Servo1: {positions['servo1']['position']}, Servo2: {positions['servo2']['position']}, "
-                f"Servo3: {positions['servo3']['position']}, Servo4: {positions['servo4']['position']}"
-            )
+            pos_list = positions["positions"]
+            pos_str = ", ".join([f"Servo{j+1}: {pos_list[j]}" for j in range(len(pos_list))])
+            print(f"Final positions - {pos_str}")
 
     except Exception as e:
         print(f"Error: {e}")
