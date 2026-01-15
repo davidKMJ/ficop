@@ -1,0 +1,16 @@
+[project]
+name = "urop-mount-automation"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "comtypes>=1.4.14",
+    "matplotlib>=3.10.8",
+    "pandas>=2.3.3",
+    "pyserial>=3.5",
+    "pyvisa>=1.16.0",
+    "scikit-learn>=1.7.2",
+    "scikit-optimize>=0.10.2",
+    "wxpython>=4.2.4",
+]
