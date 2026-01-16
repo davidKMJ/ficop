@@ -5,7 +5,7 @@ import time
 
 # Configuration
 # Motor
-MOTOR_DEVICE = "COM3"
+MOTOR_DEVICE = "COM4"
 MOTOR_BAUDRATE = 1000000
 SERVO_IDS = [30, 31, 80, 81]
 MIN_POSITION = 500
@@ -19,13 +19,15 @@ WAIT_FOR_OSCILLOSCOPE = 0.1  # Seconds
 # Value scaling
 VALUE_OFFSET = 8000000
 VALUE_SCALING_FACTOR = 10000000
+VALUE_THRESHOLD = 0.032
 
 # Optimization
 NO_UPDATE_COUNT_THRESHOLD = 3
-MANUAL_SEARCH_ITERATIONS = 0
+REASONABLE_VALUE_THRESHOLD = 0.035
+MANUAL_SEARCH_ITERATIONS = int(input("MANUAL_SEARCH_ITERATIONS: "))
 ONE_KNOB_SEARCH_ITERATIONS = 0
-TWO_KNOB_SEARCH_ITERATIONS = 6
-FINE_MANUAL_SEARCH_ITERATIONS = 3
+TWO_KNOB_SEARCH_ITERATIONS = int(input("TWO_KNOB_SEARCH_ITERATIONS: "))
+FINE_MANUAL_SEARCH_ITERATIONS = int(input("FINE_MANUAL_SEARCH_ITERATIONS: "))
 
 # Global instances (initialized in main)
 oscilloscope = None
@@ -126,8 +128,11 @@ def get_value():
     """
     time.sleep(WAIT_FOR_OSCILLOSCOPE)
     mean = np.mean(oscilloscope.read_values(channel=OSCILLOSCOPE_CHANNEL)[1])
-    return (mean - VALUE_OFFSET) / VALUE_SCALING_FACTOR
+    value = (mean - VALUE_OFFSET) / VALUE_SCALING_FACTOR
 
+    if value < VALUE_THRESHOLD:
+        raise Exception("Beam not detected (try again after checking if the beam is blocked)")
+    return value
 
 def blackbox(positions):
     """
@@ -176,7 +181,7 @@ def manual_search(servo_idx, margin, step, is_fine_search=False, verbose=True):
             manual_best_pos[servo_idx] = pos
         else:
             no_update_count += 1
-        if not is_fine_search and no_update_count > NO_UPDATE_COUNT_THRESHOLD:
+        if not is_fine_search and no_update_count > NO_UPDATE_COUNT_THRESHOLD and manual_best_value > REASONABLE_VALUE_THRESHOLD:
             break
     return blackbox(manual_best_pos)
 
@@ -332,7 +337,7 @@ def optimization(verbose=True):
                         verbose=verbose,
                     ),
                 )
-            if max_value < current_value * 1.05:
+            if max_value < current_value * 1.03:
                 print("\n\nEarly stopping condition met")
                 break
         print("\n\nTwo-knob search done")

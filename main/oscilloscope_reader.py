@@ -99,15 +99,16 @@ class OscilloscopeReader:
         waveform_format="WORD",
         time_mode="ROLL",
         start_acquisition=True,
+        time_scale=0.001,
     ):
         """
         Configure the oscilloscope settings.
 
         Args:
             memory_depth (int): Memory depth for the sample (default: 12000)
-            waveform_mode (str): Waveform mode - "NORM", "MAX", "AVER", etc. (default: "NORM")
-            waveform_format (str): Data transmission type - "WORD", "BYTE", "ASC" (default: "WORD")
-            time_mode (str): Time mode - "ROLL", "MAIN", etc. (default: "ROLL")
+            waveform_mode (str): Waveform mode (default: "NORM")
+            waveform_format (str): Data transmission type (default: "WORD")
+            time_mode (str): Time mode (default: "ROLL")
             start_acquisition (bool): Whether to start acquisition (default: True)
         """
         if not self.is_connected:
@@ -120,6 +121,7 @@ class OscilloscopeReader:
         self.device.write(f"WAV:MODE {waveform_mode}")  # Waveform mode
         self.device.write(f"WAV:FORM {waveform_format}")  # Data format
         self.device.write(f"TIM:MODE {time_mode}")  # Time mode
+        self.device.write(f"TIM:MAIN:SCAL {time_scale}")  # Time scale
 
         # Get and store sample rate
         self.sample_rate = float(self.device.query("ACQ:SRAT?"))
