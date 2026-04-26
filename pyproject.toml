@@ -8,6 +8,7 @@ dependencies = [
     "comtypes>=1.4.14",
     "matplotlib>=3.10.8",
     "pandas>=2.3.3",
+    "pyqt6>=6.11.0",
     "pyserial>=3.5",
     "pyvisa>=1.16.0",
     "scikit-learn>=1.7.2",
