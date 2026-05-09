@@ -16,7 +16,7 @@ class Oscilloscope(BaseLogger):
     def __init__(
         self,
         device_name: Optional[str] = None,
-        timeout: int = 10000,
+        timeout: int = 30000,
         channel: Optional[int] = None,
         auto_configure: bool = True,
     ) -> None:
@@ -25,7 +25,11 @@ class Oscilloscope(BaseLogger):
 
         Args:
             device_name: The name of the oscilloscope device to connect to.
-            timeout: The timeout in milliseconds for the oscilloscope.
+            timeout: The VISA timeout in milliseconds. The first ``*IDN?`` after
+                opening a USB-serial scope (e.g. Rigol via CH340/FTDI) can take
+                several seconds, and ``pyvisa-py`` blocks for the full timeout
+                when no byte arrives, so the default mirrors the 30 s used in
+                the original standalone script.
             channel: The channel to read from (e.g. ``1`` or ``2``).
             auto_configure: Whether to automatically configure the oscilloscope.
         """

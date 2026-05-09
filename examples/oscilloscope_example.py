@@ -7,7 +7,7 @@ import numpy as np
 
 from cua.logger import Oscilloscope
 
-DEVICE_NAME: str | None = "ASRL/dev/cu.usbserial-140::INSTR"
+DEVICE_NAME: str | None = None  # Change to the oscilloscope device name
 CHANNEL: int = 1
 
 
