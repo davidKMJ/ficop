@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 from cua.logger import PicoLogger
 
-CHANNEL_KEY = "PL1000_CHANNEL_1"
+CHANNEL = 1
 INPUT_RANGE_MV = 2500
 STREAM_SAMPLES_PER_BLOCK = 1_000
 STREAM_US_PER_BLOCK = 1_000_000
@@ -16,7 +16,7 @@ def example_single_value() -> None:
     print("Example 1: single-shot readings")
     print("=" * 60)
 
-    pico = PicoLogger(channel_key=CHANNEL_KEY, input_range_mv=INPUT_RANGE_MV)
+    pico = PicoLogger(channel=CHANNEL, input_range_mv=INPUT_RANGE_MV)
     with pico:
         for i in range(5):
             value, unit = pico.get_current_value()
@@ -30,7 +30,7 @@ def example_streaming_block() -> None:
     print("=" * 60)
 
     pico = PicoLogger(
-        channel_key=CHANNEL_KEY,
+        channel=CHANNEL,
         input_range_mv=INPUT_RANGE_MV,
         stream_samples_per_channel=STREAM_SAMPLES_PER_BLOCK,
         stream_us_per_block=STREAM_US_PER_BLOCK,
@@ -47,7 +47,7 @@ def example_streaming_block() -> None:
         plt.plot(time_ms, mv, lw=1)
         plt.xlabel("Time (ms)")
         plt.ylabel("Voltage (mV)")
-        plt.title(f"PicoLog block from {CHANNEL_KEY}")
+        plt.title(f"PicoLog block from channel {CHANNEL}")
         plt.tight_layout()
         plt.show()
     finally:
@@ -60,7 +60,7 @@ def example_plot_stream() -> None:
     print("Example 3: live plot of single-shot readings")
     print("=" * 60)
 
-    pico = PicoLogger(channel_key=CHANNEL_KEY, input_range_mv=INPUT_RANGE_MV)
+    pico = PicoLogger(channel=CHANNEL, input_range_mv=INPUT_RANGE_MV)
     pico.plot_stream(
         log=True,
         log_path="picolog_run.txt",
