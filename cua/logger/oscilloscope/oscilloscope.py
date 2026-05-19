@@ -17,7 +17,6 @@ class Oscilloscope(BaseLogger):
         self,
         device_name: Optional[str] = None,
         timeout: int = 30000,
-        channel: Optional[int] = None,
         auto_configure: bool = True,
     ) -> None:
         """
@@ -30,7 +29,6 @@ class Oscilloscope(BaseLogger):
                 several seconds, and ``pyvisa-py`` blocks for the full timeout
                 when no byte arrives, so the default mirrors the 30 s used in
                 the original standalone script.
-            channel: The channel to read from (e.g. ``1`` or ``2``).
             auto_configure: Whether to automatically configure the oscilloscope.
         """
         super().__init__(device_name)
@@ -38,7 +36,6 @@ class Oscilloscope(BaseLogger):
         self.rm = None
         self.device = None
         self.sample_rate: Optional[float] = None
-        self._channel = channel
         self._auto_configure = auto_configure
 
     def connect(self, verbose: bool = False) -> None:
@@ -149,12 +146,11 @@ class Oscilloscope(BaseLogger):
         self.device.write("SYST:BEEP ON")
         self.device.write("SYST:BEEP OFF")
 
-    def read_values(self, channel: Optional[int] = None) -> np.ndarray:
+    def read_values(self, channel: int) -> np.ndarray:
         if not self._connected:
             raise RuntimeError("Oscilloscope not connected")
 
-        if channel is not None:
-            self.device.write(f"WAV:SOUR CHAN{channel}")
+        self.device.write(f"WAV:SOUR CHAN{channel}")
 
         y = self.device.query_binary_values(
             "WAV:DATA?", container=np.array, datatype="i"
@@ -163,7 +159,7 @@ class Oscilloscope(BaseLogger):
         x = np.arange(0, len(y))
         return np.array([x, y])
 
-    def read_values_with_time(self, channel: Optional[int] = None) -> np.ndarray:
+    def read_values_with_time(self, channel: int) -> np.ndarray:
         if not self._connected:
             raise RuntimeError("Oscilloscope not connected")
 
@@ -186,10 +182,10 @@ class Oscilloscope(BaseLogger):
 
         self.device.write(command)
 
-    def get_current_value(self) -> Tuple[Number, Optional[str]]:
+    def get_current_value(self, channel: int) -> Tuple[Number, Optional[str]]:
         if not self._connected:
             raise RuntimeError("Oscilloscope not connected")
-        xy = self.read_values(channel=self._channel)
+        xy = self.read_values(channel)
         y = xy[1]
         if len(y) == 0:
             raise RuntimeError("Oscilloscope returned an empty waveform")

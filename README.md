@@ -59,13 +59,13 @@ ficop/
 
 **Features:** Read a scalar merit signal from hardware. Use it in optimizers or plot it live.
 
-All loggers share `BaseLogger`. Key methods are `connect`, `disconnect`, and `get_current_value`.
+All loggers share `BaseLogger`. Key methods are `connect`, `disconnect`, and `get_current_value(channel)`.
 
-Use `BaseLogger.plot_stream()` for a quick live plot.
+Pass the 1-based channel number to each read call (not to the constructor). Use `BaseLogger.plot_stream(channel)` for a quick live plot.
 
 Oscilloscope logger: `cua.logger.Oscilloscope`. It uses PyVISA. It can read waveforms. It can auto-configure.
 
-PicoLog logger: `cua.logger.PicoLogger`. It uses `picosdk`. It streams samples. It returns a scalar for a selected channel.
+PicoLog logger: `cua.logger.PicoLogger`. It uses `picosdk`. It streams samples. Pass the channel to `get_current_value(channel)` or `get_values(channel)`.
 
 Related paths:
 
@@ -94,7 +94,7 @@ To upgrade:
 
 Built-ins: `ManualOptimizer`, `TwoKnobOptimizer`, and `Compose`.
 
-Helpers: `default_value_fn` and `oscilloscope_mean_value_fn`.
+Helpers: `default_value_fn(channel)` and `oscilloscope_mean_value_fn(channel=…)`.
 
 Related paths:
 

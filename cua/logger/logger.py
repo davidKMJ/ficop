@@ -32,9 +32,9 @@ class BaseLogger(ABC):
         """Close the device / session."""
 
     @abstractmethod
-    def get_current_value(self) -> Tuple[Number, Optional[str]]:
+    def get_current_value(self, channel: int) -> Tuple[Number, Optional[str]]:
         """
-        Sample the current reading.
+        Sample the current reading on ``channel`` (1-based).
 
         Returns:
             (value, unit): unit is a short string (e.g. ``\"mV\"``) or ``None`` if unknown / dimensionless.
@@ -50,6 +50,7 @@ class BaseLogger(ABC):
 
     def plot_stream(
         self,
+        channel: int,
         log: bool = False,
         log_path: Optional[Union[str, Path]] = None,
         update_interval_s: float = 0.05,
@@ -99,7 +100,7 @@ class BaseLogger(ABC):
             plt.show(block=False)
 
             while running and plt.fignum_exists(fig.number):
-                val, unit = self.get_current_value()
+                val, unit = self.get_current_value(channel)
                 t_ms = (time.perf_counter() - t0) * 1000.0
                 fv = float(val)
 

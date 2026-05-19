@@ -157,7 +157,7 @@ class DummyLogger(BaseLogger):
             merit += float(self.noise * np.random.randn())
         return merit
 
-    def get_current_value(self) -> Tuple[float, Optional[str]]:
+    def get_current_value(self, channel: int = 1) -> Tuple[float, Optional[str]]:
         if not self._connected:
             raise RuntimeError("DummyLogger not connected")
         return self._merit(), self._unit

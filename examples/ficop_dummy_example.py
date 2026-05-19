@@ -74,7 +74,7 @@ def main() -> None:
 
     try:
         print(f"Initial positions: {servos.read_positions()}")
-        print(f"Initial merit:     {logger.get_current_value()[0]:.6f}")
+        print(f"Initial merit:     {logger.get_current_value(1)[0]:.6f}")
 
         pipeline = build_pipeline(logger, servos)
 
@@ -86,7 +86,7 @@ def main() -> None:
         print("=" * 60)
         print(f"Best merit reported by Compose: {best:.6f}")
         print(f"Final positions:                {servos.read_positions()}")
-        print(f"Final merit (re-read):          {logger.get_current_value()[0]:.6f}")
+        print(f"Final merit (re-read):          {logger.get_current_value(1)[0]:.6f}")
         print(f"Wall-clock duration:            {duration:.2f} s")
         print("=" * 60)
     finally:

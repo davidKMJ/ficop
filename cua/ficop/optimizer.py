@@ -13,10 +13,14 @@ ValueFn = Callable[[BaseLogger], float]
 LogFn = Callable[[str], None]
 
 
-def default_value_fn(logger: BaseLogger) -> float:
-    """Read a single scalar from ``logger.get_current_value()``."""
-    val, _unit = logger.get_current_value()
-    return float(val)
+def default_value_fn(channel: int) -> ValueFn:
+    """Build a ``value_fn`` that reads ``logger.get_current_value(channel)``."""
+
+    def fn(logger: BaseLogger) -> float:
+        val, _unit = logger.get_current_value(channel)
+        return float(val)
+
+    return fn
 
 
 def oscilloscope_mean_value_fn(
@@ -32,7 +36,7 @@ def oscilloscope_mean_value_fn(
     """
 
     def fn(logger: BaseLogger) -> float:
-        xy = logger.read_values(channel=channel)
+        xy = logger.read_values(channel)
         mean = float(np.mean(xy[1]))
         return (mean - offset) / scaling_factor
 
@@ -74,7 +78,7 @@ class BaseOptimizer(ABC):
             wait_for_value: Settle time (s) between motion and reading.
             value_threshold: Below this the read is treated as "beam not detected".
             value_fn: ``callable(logger) -> float`` returning the merit value.
-                Defaults to :func:`default_value_fn`.
+                Defaults to :func:`default_value_fn` on channel ``1``.
             verbose: When True, per-iteration progress lines are emitted.
             log_fn: Sink for log messages (defaults to :func:`print`).
         """
@@ -86,7 +90,7 @@ class BaseOptimizer(ABC):
         self.position_timeout = float(position_timeout)
         self.wait_for_value = float(wait_for_value)
         self.value_threshold = float(value_threshold)
-        self.value_fn = value_fn or default_value_fn
+        self.value_fn = value_fn if value_fn is not None else default_value_fn(1)
         self.verbose = bool(verbose)
         self._log = log_fn
 
@@ -191,7 +195,7 @@ class ManualOptimizer(BaseOptimizer):
     def _sweep_one_servo(self, servo_idx: int, margin: int) -> float:
         positions = self.read_positions()
         best_pos = positions.copy()
-        best_value = -np.inf
+        best_value = self.blackbox(positions)
         low = positions[servo_idx] - margin
         high = positions[servo_idx] + margin
         no_update_count = 0
@@ -288,7 +292,7 @@ class TwoKnobOptimizer(BaseOptimizer):
 
     def _walk_pair(self, idx1: int, idx2: int) -> float:
         best_pos = self.read_positions()
-        best_value = -np.inf
+        best_value = self.blackbox(best_pos)
         direction = self._get_direction(idx1, idx2)
         no_update_count = 0
         iter_count = 0

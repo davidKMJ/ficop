@@ -1,0 +1,163 @@
+{
+  "scservo": {
+    "port": "<dummy>",
+    "baudrate": 1000000,
+    "protocol_end": 0,
+    "scan_min": 1,
+    "scan_max": 252,
+    "acceleration": 0,
+    "speed": 0,
+    "hold_torque_on_disconnect": false,
+    "dummy_servo_ids": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "servo_ids": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "servo_names": {
+      "1": "",
+      "2": "",
+      "3": "",
+      "4": ""
+    },
+    "pairs": [
+      {
+        "a": 1,
+        "b": 2,
+        "name": ""
+      },
+      {
+        "a": 3,
+        "b": 4,
+        "name": ""
+      }
+    ],
+    "shiver_amplitude": 100,
+    "shiver_duration_s": 2.0
+  },
+  "logger": {
+    "style": "dummy",
+    "channel": 1,
+    "devices": {
+      "dummy": "<dummy>",
+      "picolog": "pl1000",
+      "oscilloscope": "ASRL1::INSTR"
+    },
+    "channel_names": {
+      "dummy": {},
+      "picolog": {},
+      "oscilloscope": {}
+    },
+    "value_records": {
+      "dummy": {},
+      "picolog": {},
+      "oscilloscope": {}
+    },
+    "dummy": {
+      "center": "0, 0, 0, 0",
+      "sigma": "100",
+      "noise": 0.001,
+      "unit": ""
+    },
+    "picolog": {
+      "input_range_mv": 2500,
+      "stream_samples_per_channel": 1000,
+      "stream_us_per_block": 1000000
+    },
+    "oscilloscope": {
+      "timeout": 30000,
+      "auto_configure": true,
+      "memory_depth": 12000,
+      "waveform_mode": "NORM",
+      "waveform_format": "WORD",
+      "time_mode": "ROLL",
+      "time_scale": 0.001,
+      "unit": "V",
+      "mean_waveform": true,
+      "offset": 0.0,
+      "scale": 1.0
+    }
+  },
+  "optimizer": {
+    "base": {
+      "min_position": 0,
+      "max_position": 4095,
+      "position_threshold": 5,
+      "position_timeout": 5.0,
+      "wait_for_value": 0.1,
+      "value_threshold": -1e+100,
+      "verbose": true,
+      "restore_on_stop": true
+    },
+    "items": [
+      {
+        "type": "manual",
+        "enabled": true,
+        "name": "Coarse manual sweep",
+        "channel": 1,
+        "args": {
+          "iterations": 1,
+          "margin": 500,
+          "step": 10,
+          "margin_decay": 1.5,
+          "no_update_count_early_stop": false,
+          "no_update_count_threshold": 10
+        },
+        "servo_ids": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      {
+        "type": "two_knob",
+        "enabled": true,
+        "name": "Two-knob walk",
+        "channel": 1,
+        "args": {
+          "iterations": 10,
+          "step": 5,
+          "direction_update_interval": 5,
+          "no_update_count_threshold": 10
+        },
+        "pairs": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ]
+        ]
+      },
+      {
+        "type": "manual",
+        "enabled": true,
+        "name": "Fine manual sweep",
+        "channel": 1,
+        "args": {
+          "iterations": 3,
+          "margin": 50,
+          "step": 2,
+          "margin_decay": 1.0,
+          "no_update_count_early_stop": true,
+          "no_update_count_threshold": 10
+        },
+        "servo_ids": [
+          1,
+          2,
+          3,
+          4
+        ]
+      }
+    ]
+  }
+}

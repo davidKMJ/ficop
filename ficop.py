@@ -18,8 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from PyQt6.QtCore import QEvent, QObject, Qt, QThread, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QGuiApplication, QPalette
+from PyQt6.QtCore import QEvent, QObject, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QGuiApplication, QPalette
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -52,7 +52,13 @@ from PyQt6.QtWidgets import (
 
 import pyqtgraph as pg
 
-from cua.ficop import Compose, ManualOptimizer, TwoKnobOptimizer, default_value_fn
+from cua.ficop import (
+    Compose,
+    ManualOptimizer,
+    TwoKnobOptimizer,
+    default_value_fn,
+    oscilloscope_mean_value_fn,
+)
 from cua.ficop.dummy import DummyController, DummyLogger
 from cua.logger import BaseLogger, Oscilloscope, PicoLogger
 from cua.scservo import ServoController, scan_scservo_ids
@@ -68,6 +74,17 @@ DUMMY_PORT = "<dummy>"
 APP_DIR = Path.home() / ".ficop"
 APP_CONFIG_PATH = APP_DIR / "ui_config.json"
 PRESET_SUFFIX = ".ficop-preset.json"
+
+CHANNEL_PLOT_COLORS: tuple[tuple[int, int, int], ...] = (
+    (45, 125, 245),
+    (220, 75, 75),
+    (45, 165, 95),
+    (210, 135, 35),
+    (145, 85, 210),
+    (0, 150, 170),
+    (215, 95, 150),
+    (125, 125, 55),
+)
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -101,6 +118,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "picolog": {},
             "oscilloscope": {},
         },
+        "value_records": {
+            "dummy": {},
+            "picolog": {},
+            "oscilloscope": {},
+        },
         "dummy": {
             "center": "0, 0, 0, 0",
             "sigma": "100",
@@ -128,8 +150,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "optimizer": {
         "base": {
-            "min_position": -15000,
-            "max_position": 15000,
+            "min_position": 0,
+            "max_position": 4095,
             "position_threshold": 5,
             "position_timeout": 5.0,
             "wait_for_value": 0.1,
@@ -140,7 +162,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "items": [
             {
                 "type": "manual",
+                "enabled": True,
                 "name": "Coarse manual sweep",
+                "channel": 1,
                 "servo_ids": [],
                 "args": {
                     "iterations": 1,
@@ -153,7 +177,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
             },
             {
                 "type": "two_knob",
+                "enabled": True,
                 "name": "Two-knob walk",
+                "channel": 1,
                 "pairs": [],
                 "args": {
                     "iterations": 10,
@@ -164,7 +190,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
             },
             {
                 "type": "manual",
+                "enabled": True,
                 "name": "Fine manual sweep",
+                "channel": 1,
                 "servo_ids": [],
                 "args": {
                     "iterations": 5,
@@ -211,9 +239,7 @@ def _migrate_logger_devices(config: dict[str, Any]) -> dict[str, Any]:
     lc = config.get("logger")
     if not isinstance(lc, dict):
         return config
-    devices = lc.setdefault(
-        "devices", deepcopy(DEFAULT_CONFIG["logger"]["devices"])
-    )
+    devices = lc.setdefault("devices", deepcopy(DEFAULT_CONFIG["logger"]["devices"]))
     legacy = lc.pop("device_name", None)
     if legacy:
         style = str(lc.get("style", "dummy"))
@@ -221,6 +247,10 @@ def _migrate_logger_devices(config: dict[str, Any]) -> dict[str, Any]:
     lc.setdefault(
         "channel_names",
         deepcopy(DEFAULT_CONFIG["logger"]["channel_names"]),
+    )
+    lc.setdefault(
+        "value_records",
+        deepcopy(DEFAULT_CONFIG["logger"]["value_records"]),
     )
     return config
 
@@ -377,6 +407,119 @@ def _resolve_merit_unit(config: dict[str, Any]) -> str:
     return ""
 
 
+def _channel_nickname(config: dict[str, Any], channel: int) -> str:
+    lc = config.get("logger", {})
+    style = str(lc.get("style", "dummy"))
+    names = lc.get("channel_names", {}).get(style, {}) or {}
+    return str(names.get(str(int(channel)), "")).strip()
+
+
+def _channel_label(config: dict[str, Any], channel: int) -> str:
+    nick = _channel_nickname(config, channel)
+    return nick if nick else f"Ch {int(channel)}"
+
+
+def _optimizer_enabled(item: dict[str, Any]) -> bool:
+    return bool(item.get("enabled", True))
+
+
+def _build_value_fn(
+    config: dict[str, Any], channel: int
+) -> Callable[[BaseLogger], float]:
+    """Build a merit reader for a specific logger channel."""
+    lc = config.get("logger", {})
+    style = str(lc.get("style", "dummy"))
+    ch = int(channel)
+    if style == "oscilloscope":
+        scope = lc.get("oscilloscope", {})
+        if bool(scope.get("mean_waveform", True)):
+            offset = float(scope.get("offset", 0.0))
+            scale = float(scope.get("scale", 1.0)) or 1.0
+            return oscilloscope_mean_value_fn(
+                channel=ch, offset=offset, scaling_factor=scale
+            )
+
+        def scope_last(logger: BaseLogger) -> float:
+            xy = logger.read_values(ch)  # type: ignore[attr-defined]
+            y = xy[1]
+            if len(y) == 0:
+                raise RuntimeError("Oscilloscope returned an empty waveform")
+            return float(y[-1])
+
+        return scope_last
+    if style == "picolog":
+
+        def pico(logger: BaseLogger) -> float:
+            val, _unit = logger.get_current_value(ch)
+            return float(val)
+
+        return pico
+    return default_value_fn(ch)
+
+
+def _configure_scope_logger(config: dict[str, Any], logger: BaseLogger) -> None:
+    if config.get("logger", {}).get("style") != "oscilloscope":
+        return
+    scope = config.get("logger", {}).get("oscilloscope", {})
+    if not bool(scope.get("auto_configure", True)):
+        return
+    logger.configure(  # type: ignore[attr-defined]
+        memory_depth=int(scope.get("memory_depth", 12000)),
+        waveform_mode=str(scope.get("waveform_mode", "NORM")),
+        waveform_format=str(scope.get("waveform_format", "WORD")),
+        time_mode=str(scope.get("time_mode", "ROLL")),
+        start_acquisition=True,
+        time_scale=float(scope.get("time_scale", 0.001)),
+    )
+
+
+def _build_logger_from_config(
+    config: dict[str, Any], controller: Any | None = None
+) -> BaseLogger:
+    lc = config["logger"]
+    style = str(lc.get("style", "dummy"))
+    if style == "dummy":
+        if config["scservo"].get("port") != DUMMY_PORT:
+            raise ValueError(
+                "Dummy logger is only available with the dummy servo controller."
+            )
+        if controller is None:
+            raise ValueError("Dummy logger requires a servo controller.")
+        dummy = lc.get("dummy", {})
+        unit = str(dummy.get("unit", "")).strip() or None
+        return DummyLogger(
+            controller,
+            center=_parse_number_list(str(dummy.get("center", "0"))),
+            sigma=_parse_number_list(str(dummy.get("sigma", "100"))),
+            noise=float(dummy.get("noise", 0.0)),
+            unit=unit,
+        )
+    if style == "picolog":
+        pico = lc.get("picolog", {})
+        return PicoLogger(
+            device_name="pl1000",
+            input_range_mv=int(pico.get("input_range_mv", 2500)),
+            stream_samples_per_channel=int(
+                pico.get("stream_samples_per_channel", 1000)
+            ),
+            stream_us_per_block=int(pico.get("stream_us_per_block", 1_000_000)),
+        )
+    if style == "oscilloscope":
+        scope = lc.get("oscilloscope", {})
+        devices_cfg = lc.get("devices") or {}
+        device_name = str(
+            devices_cfg.get("oscilloscope") or lc.get("device_name") or ""
+        )
+        if not device_name:
+            raise ValueError("Select an oscilloscope device (Logger → Device).")
+        return Oscilloscope(
+            device_name=device_name,
+            timeout=int(scope.get("timeout", 30000)),
+            auto_configure=False,
+        )
+    raise ValueError(f"Unknown logger style: {style}")
+
+
 def _build_servo_controller(config: dict[str, Any]) -> Any:
     """Build (but do not connect) a controller based on the current config."""
     sc = config["scservo"]
@@ -392,6 +535,24 @@ def _build_servo_controller(config: dict[str, Any]) -> Any:
         baudrate=int(sc.get("baudrate", 1_000_000)),
         protocol_end=int(sc.get("protocol_end", 0)),
     )
+
+
+def _prime_hardware_servos(controller: Any, config: dict[str, Any]) -> None:
+    """
+    Apply Settings acc/speed and enable torque so goal writes take effect.
+
+    Disconnect with ``hold_torque_on_disconnect`` off turns torque off; without
+    re-enabling, many servos ignore goal position writes.
+    """
+    if not isinstance(controller, ServoController):
+        return
+    sc = config["scservo"]
+    controller.configure_servos(
+        acc=int(sc.get("acceleration", 0)),
+        speed=int(sc.get("speed", 0)),
+    )
+    for sid in controller.servo_ids:
+        controller.set_torque_enable(sid, True)
 
 
 def _snapshot_dummy(controller: Any) -> None:
@@ -429,10 +590,13 @@ class _ServoActionWorker(QObject):
         self,
         config: dict[str, Any],
         fn: Callable[["_ServoActionWorker", Any], Any],
+        *,
+        hold_torque: bool | None = None,
     ) -> None:
         super().__init__()
         self._config = deepcopy(config)
         self._fn = fn
+        self._hold_torque = hold_torque
         self._stop_requested = False
 
     def request_stop(self) -> None:
@@ -448,15 +612,19 @@ class _ServoActionWorker(QObject):
         try:
             controller = _build_servo_controller(self._config)
             controller.connect()
+            _prime_hardware_servos(controller, self._config)
             result = self._fn(self, controller)
             self.completed.emit(result)
         except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
         finally:
             if controller is not None:
-                hold = bool(
-                    self._config["scservo"].get("hold_torque_on_disconnect", False)
-                )
+                if self._hold_torque is not None:
+                    hold = self._hold_torque
+                else:
+                    hold = bool(
+                        self._config["scservo"].get("hold_torque_on_disconnect", False)
+                    )
                 try:
                     _disconnect_controller(controller, hold)
                 except Exception:
@@ -519,7 +687,7 @@ class _OptimizeWorker(QObject):
     completed = pyqtSignal(float, float, bool)  # seconds, merit, was_stopped
     failed = pyqtSignal(str)
     recorded = pyqtSignal(dict)  # auto-record of start/end positions
-    sample = pyqtSignal(int, float, float)  # index, value, best_so_far
+    sample = pyqtSignal(int, float, float, int)  # index, value, channel_best, channel
     stage = pyqtSignal(int, str)  # stage_index, stage_name
     unit = pyqtSignal(str)  # merit unit (e.g. "mV", "V", "")
 
@@ -532,6 +700,7 @@ class _OptimizeWorker(QObject):
         self._start_positions: list[int] | None = None
         self._sample_index = 0
         self._best_value = float("-inf")
+        self._best_values_by_channel: dict[int, float] = {}
 
     def request_stop(self) -> None:
         self._stop_requested = True
@@ -547,22 +716,18 @@ class _OptimizeWorker(QObject):
         elapsed = 0.0
         self._sample_index = 0
         self._best_value = float("-inf")
+        self._best_values_by_channel = {}
         try:
             self._controller = self._build_controller()
-            self._logger = self._build_logger(self._controller)
+            self._logger = _build_logger_from_config(self._config, self._controller)
             self.unit.emit(_resolve_merit_unit(self._config))
             self._controller.connect()
-            if hasattr(self._controller, "configure_servos"):
-                sc = self._config["scservo"]
-                self._controller.configure_servos(
-                    acc=int(sc.get("acceleration", 0)),
-                    speed=int(sc.get("speed", 0)),
-                )
+            _prime_hardware_servos(self._controller, self._config)
             self._logger.connect()
-            self._configure_logger_after_connect()
+            _configure_scope_logger(self._config, self._logger)
 
             self._start_positions = list(self._controller.read_positions())
-            self.log_line.emit(f"Start positions: {self._start_positions}")
+            self.log_line.emit(f"Run: start positions {self._start_positions}")
             self._emit_record("Run start", self._start_positions)
 
             pipeline = self._build_pipeline(self._logger, self._controller)
@@ -571,25 +736,26 @@ class _OptimizeWorker(QObject):
                 merit = float(pipeline.run())
             except _StopRequested:
                 was_stopped = True
-                self.log_line.emit("Optimization stopped by user.")
+                self.log_line.emit("Run: stopped by user.")
                 if (
                     bool(self._config["optimizer"]["base"].get("restore_on_stop", True))
                     and self._start_positions
                 ):
                     try:
                         self._controller.set_positions(self._start_positions)
-                        self.log_line.emit("Restored start positions.")
+                        self.log_line.emit("Servo: restored start positions.")
                     except Exception as exc:
-                        self.log_line.emit(f"Restore failed: {exc}")
+                        self.log_line.emit(f"Servo restore error: {exc}")
             elapsed = time.perf_counter() - started
 
             try:
                 end_positions = list(self._controller.read_positions())
-                tag = "Run stopped" if was_stopped else "Run end"
-                self.log_line.emit(f"{tag} positions: {end_positions}")
-                self._emit_record(tag, end_positions)
+                record_tag = "Run stopped" if was_stopped else "Run end"
+                status_tag = "stopped" if was_stopped else "end"
+                self.log_line.emit(f"Run: {status_tag} positions {end_positions}")
+                self._emit_record(record_tag, end_positions)
             except Exception as exc:
-                self.log_line.emit(f"Could not read end positions: {exc}")
+                self.log_line.emit(f"Servo read error: {exc}")
 
             self.completed.emit(float(elapsed), float(merit), bool(was_stopped))
         except Exception as exc:
@@ -609,9 +775,10 @@ class _OptimizeWorker(QObject):
             }
         )
 
-    def _wrap_optimizer_for_stop(self, optimizer: Any) -> None:
+    def _wrap_optimizer_for_stop(self, optimizer: Any, channel: int) -> None:
         original_blackbox = optimizer.blackbox
         worker = self
+        active_channel = int(channel)
 
         def patched(positions, _orig=original_blackbox):
             if worker._stop_requested:
@@ -623,9 +790,15 @@ class _OptimizeWorker(QObject):
                 return value
             if math.isfinite(fvalue) and fvalue > worker._best_value:
                 worker._best_value = fvalue
+            channel_best = worker._best_values_by_channel.get(
+                active_channel, float("-inf")
+            )
+            if math.isfinite(fvalue) and fvalue > channel_best:
+                channel_best = fvalue
+                worker._best_values_by_channel[active_channel] = fvalue
             worker._sample_index += 1
-            best = worker._best_value if math.isfinite(worker._best_value) else fvalue
-            worker.sample.emit(worker._sample_index, fvalue, best)
+            best = channel_best if math.isfinite(channel_best) else fvalue
+            worker.sample.emit(worker._sample_index, fvalue, best, active_channel)
             return value
 
         optimizer.blackbox = patched
@@ -635,7 +808,7 @@ class _OptimizeWorker(QObject):
             try:
                 self._logger.disconnect()
             except Exception as exc:
-                self.log_line.emit(f"Logger disconnect: {exc}")
+                self.log_line.emit(f"Logger disconnect error: {exc}")
         if self._controller is not None:
             try:
                 hold = bool(
@@ -643,24 +816,7 @@ class _OptimizeWorker(QObject):
                 )
                 _disconnect_controller(self._controller, hold)
             except Exception as exc:
-                self.log_line.emit(f"Servo disconnect: {exc}")
-
-    def _configure_logger_after_connect(self) -> None:
-        if self._config["logger"].get("style") != "oscilloscope":
-            return
-        if self._logger is None:
-            return
-        scope = self._config["logger"].get("oscilloscope", {})
-        if not bool(scope.get("auto_configure", True)):
-            return
-        self._logger.configure(  # type: ignore[attr-defined]
-            memory_depth=int(scope.get("memory_depth", 12000)),
-            waveform_mode=str(scope.get("waveform_mode", "NORM")),
-            waveform_format=str(scope.get("waveform_format", "WORD")),
-            time_mode=str(scope.get("time_mode", "ROLL")),
-            start_acquisition=True,
-            time_scale=float(scope.get("time_scale", 0.001)),
-        )
+                self.log_line.emit(f"Servo disconnect error: {exc}")
 
     def _build_controller(self) -> Any:
         sc = self._config["scservo"]
@@ -679,79 +835,24 @@ class _OptimizeWorker(QObject):
                     )
         return _build_servo_controller(self._config)
 
-    def _build_logger(self, controller: Any) -> BaseLogger:
-        lc = self._config["logger"]
-        style = str(lc.get("style", "dummy"))
-        channel = int(lc.get("channel", 1))
-        if style == "dummy":
-            if self._config["scservo"].get("port") != DUMMY_PORT:
-                raise ValueError(
-                    "Dummy logger is only available with the dummy servo controller."
-                )
-            dummy = lc.get("dummy", {})
-            unit = str(dummy.get("unit", "")).strip() or None
-            return DummyLogger(
-                controller,
-                center=_parse_number_list(str(dummy.get("center", "0"))),
-                sigma=_parse_number_list(str(dummy.get("sigma", "100"))),
-                noise=float(dummy.get("noise", 0.0)),
-                unit=unit,
-            )
-        if style == "picolog":
-            pico = lc.get("picolog", {})
-            return PicoLogger(
-                device_name="pl1000",
-                channel=channel,
-                input_range_mv=int(pico.get("input_range_mv", 2500)),
-                stream_samples_per_channel=int(
-                    pico.get("stream_samples_per_channel", 1000)
-                ),
-                stream_us_per_block=int(pico.get("stream_us_per_block", 1_000_000)),
-            )
-        if style == "oscilloscope":
-            scope = lc.get("oscilloscope", {})
-            devices_cfg = lc.get("devices") or {}
-            device_name = str(
-                devices_cfg.get("oscilloscope") or lc.get("device_name") or ""
-            )
-            if not device_name:
-                raise ValueError(
-                    "Select an oscilloscope device (Logger → Device)."
-                )
-            osc = Oscilloscope(
-                device_name=device_name,
-                timeout=int(scope.get("timeout", 30000)),
-                channel=channel,
-                auto_configure=False,
-            )
-            if bool(scope.get("mean_waveform", True)):
-                offset = float(scope.get("offset", 0.0))
-                scale = float(scope.get("scale", 1.0)) or 1.0
-
-                def value_fn(logger: BaseLogger) -> float:
-                    xy = logger.read_values(channel=channel)  # type: ignore[attr-defined]
-                    return (float(sum(xy[1])) / max(len(xy[1]), 1) - offset) / scale
-
-                osc._ficop_value_fn = value_fn  # type: ignore[attr-defined]
-            return osc
-        raise ValueError(f"Unknown logger style: {style}")
-
     def _build_pipeline(self, logger: BaseLogger, controller: Any) -> Compose:
         servo_ids = [int(sid) for sid in self._config["scservo"].get("servo_ids", [])]
         id_to_index = {sid: i for i, sid in enumerate(servo_ids)}
+        lc = self._config["logger"]
+        default_channel = int(lc.get("channel", 1))
         base = deepcopy(self._config["optimizer"].get("base", {}))
         base.pop("restore_on_stop", None)
         base["log_fn"] = lambda msg: self.log_line.emit(str(msg))
-        if hasattr(logger, "_ficop_value_fn"):
-            base["value_fn"] = getattr(logger, "_ficop_value_fn")
-        else:
-            base["value_fn"] = default_value_fn
+        base.pop("value_fn", None)
         optimizers = []
         for item in self._config["optimizer"].get("items", []):
+            if not _optimizer_enabled(item):
+                continue
             opt_type = str(item.get("type", "manual"))
             args = deepcopy(item.get("args", {}))
             name = str(item.get("name") or opt_type)
-            self.log_line.emit(f"Queued {name}")
+            channel = int(item.get("channel", default_channel))
+            channel_label = _channel_label(self._config, channel)
             if opt_type == "manual":
                 selected_ids = [int(sid) for sid in item.get("servo_ids", servo_ids)]
                 args["servo_indices"] = [
@@ -776,9 +877,17 @@ class _OptimizeWorker(QObject):
                 cls = CUSTOM_OPTIMIZERS[opt_type]
             else:
                 cls = _resolve_custom_class(opt_type)
-            opt = cls(logger=logger, servo_controller=controller, **base, **args)
-            self._wrap_optimizer_for_stop(opt)
-            self._wrap_optimizer_for_stage(opt, len(optimizers), name)
+            opt = cls(
+                logger=logger,
+                servo_controller=controller,
+                value_fn=_build_value_fn(self._config, channel),
+                **base,
+                **args,
+            )
+            self._wrap_optimizer_for_stop(opt, channel)
+            self._wrap_optimizer_for_stage(
+                opt, len(optimizers), f"{name} [{channel_label}]"
+            )
             optimizers.append(opt)
         if not optimizers:
             raise ValueError("Add at least one optimization before running.")
@@ -1198,8 +1307,19 @@ class OptimizerDialog(QDialog):
         for key, cls in CUSTOM_OPTIMIZERS.items():
             self._type.addItem(getattr(cls, "__name__", key), key)
         self._type.addItem("Custom (import path)", "custom_path")
+        self._channel = QSpinBox()
+        self._channel.setRange(1, 16)
+        self._channel.setValue(int(config["logger"].get("channel", 1)))
+        self._channel_name_label = QLabel("")
+        self._channel_name_label.setStyleSheet("color: gray;")
+        channel_row = QHBoxLayout()
+        channel_row.addWidget(self._channel)
+        channel_row.addWidget(self._channel_name_label, 1)
+        channel_widget = QWidget()
+        channel_widget.setLayout(channel_row)
         form.addRow("Name", self._name)
         form.addRow("Optimizer", self._type)
+        form.addRow("Logger channel", channel_widget)
         layout.addLayout(form)
         self._body = QVBoxLayout()
         self._body.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -1216,7 +1336,9 @@ class OptimizerDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self._type.currentIndexChanged.connect(self._rebuild_body)
+        self._channel.valueChanged.connect(self._refresh_channel_label)
         self._load_item()
+        self._refresh_channel_label()
         self._rebuild_body()
 
     def _load_item(self) -> None:
@@ -1227,6 +1349,14 @@ class OptimizerDialog(QDialog):
             idx = self._type.findData("custom_path")
         self._type.setCurrentIndex(max(idx, 0))
         self._name.setText(str(item.get("name", "")))
+        self._channel.setValue(
+            int(item.get("channel", self._config["logger"].get("channel", 1)))
+        )
+
+    def _refresh_channel_label(self) -> None:
+        self._channel_name_label.setText(
+            _channel_label(self._config, int(self._channel.value()))
+        )
 
     def _clear_body(self) -> None:
         while self._body.count():
@@ -1417,9 +1547,12 @@ class OptimizerDialog(QDialog):
         self._editing = {
             "type": opt_type,
             "name": "",
+            "channel": int(self._config["logger"].get("channel", 1)),
             "args": deepcopy(OPTIMIZER_TYPES.get(opt_type, {}).get("defaults", {})),
         }
         self._name.clear()
+        self._channel.setValue(int(self._config["logger"].get("channel", 1)))
+        self._refresh_channel_label()
         self._rebuild_body()
 
     def _accept_checked(self) -> None:
@@ -1448,7 +1581,9 @@ class OptimizerDialog(QDialog):
         opt_type = str(self._type.currentData())
         item: dict[str, Any] = {
             "type": opt_type,
+            "enabled": _optimizer_enabled(self._editing or {}),
             "name": self._name.text().strip() or str(self._type.currentText()),
+            "channel": int(self._channel.value()),
             "args": self._read_args(),
         }
         if opt_type == "manual":
@@ -1477,6 +1612,528 @@ class OptimizerDialog(QDialog):
         return item
 
 
+class _LoggerSessionWorker(QObject):
+    connected = pyqtSignal(str)
+    value_read = pyqtSignal(int, float, str)
+    stream_started = pyqtSignal(int, float)
+    stream_stopped = pyqtSignal()
+    failed = pyqtSignal(str)
+    disconnected = pyqtSignal()
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__()
+        self._config = deepcopy(config)
+        self._controller: Any = None
+        self._logger: BaseLogger | None = None
+        self._closed = False
+        self._stream_timer: QTimer | None = None
+        self._stream_channel: int | None = None
+        self._stream_rate_hz = 0.0
+
+    @pyqtSlot()
+    def connect_session(self) -> None:
+        try:
+            style = str(self._config["logger"].get("style", "dummy"))
+            if style == "dummy":
+                self._controller = _build_servo_controller(self._config)
+                self._controller.connect()
+                _prime_hardware_servos(self._controller, self._config)
+            self._logger = _build_logger_from_config(self._config, self._controller)
+            self._logger.connect()
+            _configure_scope_logger(self._config, self._logger)
+            self._stream_timer = QTimer(self)
+            self._stream_timer.setTimerType(Qt.TimerType.PreciseTimer)
+            self._stream_timer.timeout.connect(self._read_stream_value)
+            self.connected.emit(f"Logger: connected ({style}).")
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            self.disconnect_session()
+
+    @pyqtSlot(int)
+    def read_channel(self, channel: int) -> None:
+        try:
+            self._emit_channel_value(int(channel))
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+    @pyqtSlot(int, float)
+    def start_stream(self, channel: int, rate_hz: float) -> None:
+        try:
+            if self._logger is None or not self._logger.connected:
+                raise RuntimeError("Logger is not connected.")
+            if self._stream_timer is None:
+                raise RuntimeError("Logger stream timer is not ready.")
+            rate_hz = float(rate_hz)
+            if rate_hz <= 0:
+                raise ValueError("Sample rate must be positive.")
+            self._stream_channel = int(channel)
+            self._stream_rate_hz = rate_hz
+            interval_ms = max(1, int(round(1000.0 / rate_hz)))
+            self._stream_timer.start(interval_ms)
+            self.stream_started.emit(self._stream_channel, rate_hz)
+            self._emit_channel_value(self._stream_channel)
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+    @pyqtSlot()
+    def stop_stream(self) -> None:
+        was_streaming = False
+        if self._stream_timer is not None:
+            was_streaming = self._stream_timer.isActive()
+            self._stream_timer.stop()
+        had_channel = self._stream_channel is not None
+        self._stream_channel = None
+        self._stream_rate_hz = 0.0
+        if was_streaming or had_channel:
+            self.stream_stopped.emit()
+
+    @pyqtSlot()
+    def _read_stream_value(self) -> None:
+        if self._stream_channel is None:
+            return
+        try:
+            self._emit_channel_value(self._stream_channel)
+        except Exception as exc:
+            self.stop_stream()
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+    def _emit_channel_value(self, channel: int) -> None:
+        if self._logger is None or not self._logger.connected:
+            raise RuntimeError("Logger is not connected.")
+        value = float(_build_value_fn(self._config, channel)(self._logger))
+        self.value_read.emit(channel, value, _resolve_merit_unit(self._config))
+
+    @pyqtSlot()
+    def disconnect_session(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.stop_stream()
+        try:
+            if self._logger is not None:
+                self._logger.disconnect()
+        except Exception as exc:
+            self.failed.emit(f"Logger disconnect error: {exc}")
+        finally:
+            self._logger = None
+        try:
+            if self._controller is not None:
+                hold = bool(
+                    self._config["scservo"].get("hold_torque_on_disconnect", False)
+                )
+                _disconnect_controller(self._controller, hold)
+        except Exception as exc:
+            self.failed.emit(f"Servo disconnect error: {exc}")
+        finally:
+            self._controller = None
+            self.disconnected.emit()
+            QThread.currentThread().quit()
+
+
+class ReadChannelDialog(QDialog):
+    read_requested = pyqtSignal(int)
+    stream_start_requested = pyqtSignal(int, float)
+    stream_stop_requested = pyqtSignal()
+    disconnect_requested = pyqtSignal()
+
+    def __init__(self, config: dict[str, Any], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Channel Value")
+        self.resize(520, 350)
+        self.setMinimumSize(480, 320)
+        self._config = config
+        self._thread: QThread | None = None
+        self._worker: _LoggerSessionWorker | None = None
+        self._connected = False
+        self._busy = False
+        self._streaming = False
+        self._stream_rate_hz = 0.0
+        self._closing = False
+        self._latest_values: dict[int, tuple[float, str]] = {}
+        self._value_records = self._load_value_records()
+
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.setSpacing(10)
+        top_row = QHBoxLayout()
+        top_row.addWidget(QLabel("Channel"))
+        self._channel = QSpinBox()
+        self._channel.setRange(1, 16)
+        self._channel.setValue(int(config["logger"].get("channel", 1)))
+        self._channel_name = QLabel("")
+        self._channel_name.setStyleSheet("color: gray;")
+        self._channel_name.setMinimumWidth(120)
+        self._read_btn = QPushButton("Read current")
+        self._read_btn.setEnabled(False)
+        self._read_btn.clicked.connect(self._do_read)
+        top_row.addWidget(self._channel)
+        top_row.addWidget(self._channel_name, 1)
+        top_row.addWidget(self._read_btn)
+        layout.addLayout(top_row)
+
+        stream_row = QHBoxLayout()
+        stream_row.addWidget(QLabel("Sample rate"))
+        self._sample_rate = QDoubleSpinBox()
+        self._sample_rate.setRange(0.05, 100.0)
+        self._sample_rate.setDecimals(2)
+        self._sample_rate.setSingleStep(0.5)
+        self._sample_rate.setValue(2.0)
+        self._sample_rate.setSuffix(" Hz")
+        self._stream_btn = QPushButton("Start stream")
+        self._stream_btn.setEnabled(False)
+        self._stream_btn.clicked.connect(self._toggle_stream)
+        stream_row.addWidget(self._sample_rate)
+        stream_row.addWidget(self._stream_btn)
+        stream_row.addStretch(1)
+        layout.addLayout(stream_row)
+
+        value_box = QGroupBox("Current value")
+        value_layout = QVBoxLayout(value_box)
+        self._value = QLabel("—")
+        self._value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._value.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._value.setWordWrap(True)
+        self._value.setMinimumHeight(64)
+        self._value.setStyleSheet("font-size: 24px; font-weight: 600;")
+        value_layout.addWidget(self._value)
+
+        record_row = QHBoxLayout()
+        record_row.addWidget(QLabel("Records"))
+        self._record_value_btn = QPushButton("Record value")
+        self._record_value_btn.setEnabled(False)
+        self._record_value_btn.clicked.connect(self._record_current_value)
+        self._delete_value_record_btn = QPushButton("Delete")
+        self._delete_value_record_btn.clicked.connect(self._delete_selected_value_record)
+        self._reset_value_records_btn = QPushButton("Reset")
+        self._reset_value_records_btn.clicked.connect(self._reset_value_records)
+        record_row.addStretch(1)
+        record_row.addWidget(self._record_value_btn)
+        record_row.addWidget(self._delete_value_record_btn)
+        record_row.addWidget(self._reset_value_records_btn)
+        value_layout.addLayout(record_row)
+
+        self._record_list = QListWidget()
+        self._record_list.setMinimumHeight(90)
+        self._record_list.setAlternatingRowColors(True)
+        value_layout.addWidget(self._record_list, 1)
+        layout.addWidget(value_box, 1)
+
+        self._status = QLabel("Logger: connecting…")
+        self._status.setWordWrap(True)
+        layout.addWidget(self._status)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+        self._channel.valueChanged.connect(self._refresh_channel_label)
+        self._refresh_channel_label()
+        self._start_session()
+
+    def _value_record_style(self) -> str:
+        return str(self._config.get("logger", {}).get("style", "dummy"))
+
+    def _value_records_root(self) -> dict[str, Any]:
+        lc = self._config.setdefault("logger", {})
+        return lc.setdefault(
+            "value_records", deepcopy(DEFAULT_CONFIG["logger"]["value_records"])
+        )
+
+    def _load_value_records(self) -> dict[int, list[str]]:
+        raw_by_style = self._value_records_root().setdefault(
+            self._value_record_style(), {}
+        )
+        records: dict[int, list[str]] = {}
+        if not isinstance(raw_by_style, dict):
+            return records
+        for raw_channel, raw_records in raw_by_style.items():
+            try:
+                channel = int(raw_channel)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(raw_records, list):
+                records[channel] = [str(record) for record in raw_records]
+        return records
+
+    def _save_value_records(self) -> None:
+        root = self._value_records_root()
+        root[self._value_record_style()] = {
+            str(int(channel)): [str(record) for record in records]
+            for channel, records in sorted(self._value_records.items())
+            if records
+        }
+        _save_config(self._config)
+
+    def _refresh_channel_label(self) -> None:
+        channel = int(self._channel.value())
+        self._channel_name.setText(_channel_label(self._config, channel))
+        self._refresh_value_for_channel(channel)
+        self._refresh_record_list(channel)
+
+    def _format_value_text(self, channel: int, value: float, unit: str) -> str:
+        suffix = f" {unit}" if unit else ""
+        return f"{_channel_label(self._config, channel)}: {value:.6g}{suffix}"
+
+    def _refresh_value_for_channel(self, channel: int) -> None:
+        latest = self._latest_values.get(int(channel))
+        if latest is None:
+            self._value.setText("—")
+            self._record_value_btn.setEnabled(False)
+            return
+        value, unit = latest
+        self._value.setText(self._format_value_text(channel, value, unit))
+        self._record_value_btn.setEnabled(True)
+
+    def _refresh_record_list(self, channel: int | None = None) -> None:
+        if channel is None:
+            channel = int(self._channel.value())
+        self._record_list.clear()
+        records = self._value_records.get(int(channel), [])
+        for idx, record in enumerate(records):
+            item = QListWidgetItem(record)
+            item.setData(Qt.ItemDataRole.UserRole, idx)
+            self._record_list.addItem(item)
+        has_records = bool(records)
+        self._delete_value_record_btn.setEnabled(has_records)
+        self._reset_value_records_btn.setEnabled(has_records)
+
+    def _record_current_value(self) -> None:
+        channel = int(self._channel.value())
+        latest = self._latest_values.get(channel)
+        if latest is None:
+            self._status.setText("Logger: no value to record.")
+            return
+        value, unit = latest
+        suffix = f" {unit}" if unit else ""
+        stamp = datetime.now().strftime("%H:%M:%S")
+        self._value_records.setdefault(channel, []).insert(
+            0,
+            f"{stamp}    {value:.6g}{suffix}"
+        )
+        self._save_value_records()
+        self._refresh_record_list(channel)
+        self._status.setText(f"Record: saved {_channel_label(self._config, channel)}.")
+
+    def _selected_value_record_index(self) -> int | None:
+        item = self._record_list.currentItem()
+        if item is None:
+            return None
+        try:
+            return int(item.data(Qt.ItemDataRole.UserRole))
+        except (TypeError, ValueError):
+            return None
+
+    def _delete_selected_value_record(self) -> None:
+        channel = int(self._channel.value())
+        idx = self._selected_value_record_index()
+        records = self._value_records.get(channel, [])
+        if idx is None or idx < 0 or idx >= len(records):
+            return
+        del records[idx]
+        self._save_value_records()
+        self._refresh_record_list(channel)
+        self._status.setText(f"Record: deleted {_channel_label(self._config, channel)}.")
+
+    def _reset_value_records(self) -> None:
+        channel = int(self._channel.value())
+        records = self._value_records.get(channel, [])
+        if not records:
+            self._status.setText("Records: none to reset.")
+            return
+        confirm = QMessageBox(self)
+        confirm.setIcon(QMessageBox.Icon.Warning)
+        confirm.setWindowTitle("Reset value records")
+        confirm.setText(
+            f"Delete all records for {_channel_label(self._config, channel)}?"
+        )
+        confirm.setInformativeText("This cannot be undone.")
+        confirm.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        confirm.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if confirm.exec() != QMessageBox.StandardButton.Yes:
+            return
+        count = len(records)
+        records.clear()
+        self._save_value_records()
+        self._refresh_record_list(channel)
+        self._status.setText(f"Records: reset {count} value record(s).")
+
+    def _start_session(self) -> None:
+        self._thread = QThread(self)
+        self._worker = _LoggerSessionWorker(self._config)
+        self._worker.moveToThread(self._thread)
+        self.read_requested.connect(self._worker.read_channel)
+        self.stream_start_requested.connect(self._worker.start_stream)
+        self.stream_stop_requested.connect(self._worker.stop_stream)
+        self.disconnect_requested.connect(self._worker.disconnect_session)
+        self._thread.started.connect(self._worker.connect_session)
+        self._worker.connected.connect(self._on_connected)
+        self._worker.value_read.connect(self._on_value_read)
+        self._worker.stream_started.connect(self._on_stream_started)
+        self._worker.stream_stopped.connect(self._on_stream_stopped)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.disconnected.connect(self._on_disconnected)
+        self._thread.finished.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._on_thread_finished)
+        self._thread.start()
+
+    @pyqtSlot(str)
+    def _on_connected(self, message: str) -> None:
+        self._connected = True
+        self._read_btn.setEnabled(True)
+        self._stream_btn.setEnabled(True)
+        self._record_value_btn.setEnabled(
+            int(self._channel.value()) in self._latest_values
+        )
+        self._status.setText(message)
+
+    def _do_read(self) -> None:
+        if not self._connected or self._busy or self._streaming:
+            return
+        self._busy = True
+        self._channel.setEnabled(False)
+        self._sample_rate.setEnabled(False)
+        self._read_btn.setEnabled(False)
+        self._stream_btn.setEnabled(False)
+        self._record_value_btn.setEnabled(False)
+        self._status.setText("Logger: reading…")
+        self.read_requested.emit(int(self._channel.value()))
+
+    def _toggle_stream(self) -> None:
+        if not self._connected:
+            return
+        if self._busy and not self._streaming:
+            return
+        if self._streaming:
+            self._stream_btn.setEnabled(False)
+            self._status.setText("Logger: stopping stream…")
+            self.stream_stop_requested.emit()
+            return
+        self._busy = True
+        self._channel.setEnabled(False)
+        self._sample_rate.setEnabled(False)
+        self._read_btn.setEnabled(False)
+        self._stream_btn.setEnabled(False)
+        self._record_value_btn.setEnabled(False)
+        self._status.setText("Logger: starting stream…")
+        self.stream_start_requested.emit(
+            int(self._channel.value()), float(self._sample_rate.value())
+        )
+
+    @pyqtSlot(int, float, str)
+    def _on_value_read(self, channel: int, value: float, unit: str) -> None:
+        channel = int(channel)
+        self._latest_values[channel] = (float(value), str(unit or ""))
+        self._value.setText(self._format_value_text(channel, value, unit))
+        self._record_value_btn.setEnabled(True)
+        if self._streaming:
+            self._status.setText(f"Logger: streaming at {self._stream_rate_hz:g} Hz.")
+            return
+        self._busy = False
+        self._channel.setEnabled(True)
+        self._sample_rate.setEnabled(True)
+        self._read_btn.setEnabled(self._connected)
+        self._stream_btn.setEnabled(self._connected)
+        self._status.setText("Logger: read complete.")
+
+    @pyqtSlot(int, float)
+    def _on_stream_started(self, channel: int, rate_hz: float) -> None:
+        self._busy = False
+        self._streaming = True
+        self._stream_rate_hz = float(rate_hz)
+        self._channel.setEnabled(False)
+        self._sample_rate.setEnabled(False)
+        self._read_btn.setEnabled(False)
+        self._record_value_btn.setEnabled(int(channel) in self._latest_values)
+        self._stream_btn.setEnabled(True)
+        self._stream_btn.setText("Stop stream")
+        self._status.setText(
+            f"Logger: streaming {_channel_label(self._config, channel)} "
+            f"at {rate_hz:g} Hz."
+        )
+
+    @pyqtSlot()
+    def _on_stream_stopped(self) -> None:
+        self._busy = False
+        self._streaming = False
+        self._stream_rate_hz = 0.0
+        self._channel.setEnabled(True)
+        self._sample_rate.setEnabled(True)
+        self._read_btn.setEnabled(self._connected)
+        self._stream_btn.setEnabled(self._connected)
+        self._record_value_btn.setEnabled(
+            int(self._channel.value()) in self._latest_values
+        )
+        self._stream_btn.setText("Start stream")
+        if not self._closing:
+            self._status.setText("Logger: stream stopped.")
+
+    @pyqtSlot(str)
+    def _on_failed(self, message: str) -> None:
+        self._busy = False
+        if not self._streaming:
+            self._channel.setEnabled(True)
+            self._sample_rate.setEnabled(True)
+        self._read_btn.setEnabled(self._connected)
+        self._stream_btn.setEnabled(self._connected)
+        self._record_value_btn.setEnabled(
+            int(self._channel.value()) in self._latest_values
+        )
+        self._status.setText(f"Logger error: {message}")
+        if not self._closing:
+            QMessageBox.warning(self, "Logger read failed", message)
+
+    @pyqtSlot()
+    def _on_disconnected(self) -> None:
+        self._connected = False
+        self._streaming = False
+        self._read_btn.setEnabled(False)
+        self._stream_btn.setEnabled(False)
+        self._record_value_btn.setEnabled(False)
+        self._stream_btn.setText("Start stream")
+        self._channel.setEnabled(True)
+        self._sample_rate.setEnabled(True)
+        if not self._closing:
+            self._status.setText("Logger: disconnected.")
+
+    @pyqtSlot()
+    def _on_thread_finished(self) -> None:
+        self._worker = None
+        self._thread = None
+
+    def _shutdown_session(self) -> bool:
+        if self._thread is None or not self._thread.isRunning():
+            return True
+        self._closing = True
+        self._read_btn.setEnabled(False)
+        self._stream_btn.setEnabled(False)
+        self._record_value_btn.setEnabled(False)
+        self._status.setText("Logger: disconnecting…")
+        self.disconnect_requested.emit()
+        if self._thread.wait(5000):
+            return True
+        self._closing = False
+        self._status.setText("Logger: waiting to disconnect…")
+        return False
+
+    def accept(self) -> None:
+        if self._shutdown_session():
+            super().accept()
+
+    def reject(self) -> None:
+        if self._shutdown_session():
+            super().reject()
+
+    def closeEvent(self, event) -> None:
+        if self._shutdown_session():
+            event.accept()
+            return super().closeEvent(event)
+        event.ignore()
+
+
 class ReadPositionsDialog(QDialog):
     """Read-only viewer that shows the most recent positions for each servo."""
 
@@ -1496,7 +2153,7 @@ class ReadPositionsDialog(QDialog):
             item = QListWidgetItem(f"{label}: …")
             item.setData(Qt.ItemDataRole.UserRole, int(sid))
             self._list.addItem(item)
-        self._status = QLabel("Reading…")
+        self._status = QLabel("Servo: reading positions…")
         layout.addWidget(self._status)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
@@ -1512,7 +2169,7 @@ class ReadPositionsDialog(QDialog):
             base = item.text().split(":")[0]
             item.setText(f"{base}: {int(pos)}")
             _ = sid
-        self._status.setText(f"Read {len(positions)} servo(s).")
+        self._status.setText(f"Servo: read {len(positions)} position(s).")
 
     def set_status(self, text: str) -> None:
         self._status.setText(text)
@@ -1524,7 +2181,7 @@ class SetPositionDialog(QDialog):
     def __init__(self, config: dict[str, Any], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Set Positions")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(520)
         self._config = config
         sc = config["scservo"]
         sc.setdefault("position_records", [])
@@ -1542,8 +2199,10 @@ class SetPositionDialog(QDialog):
 
     def refresh_records(self) -> None:
         self._record_list.clear()
-        for rec in self._records:
+        for idx in range(len(self._records) - 1, -1, -1):
+            rec = self._records[idx]
             item = QListWidgetItem(str(rec.get("name", "")))
+            item.setData(Qt.ItemDataRole.UserRole, idx)
             self._record_list.addItem(item)
 
     def _build_ui(self) -> None:
@@ -1598,9 +2257,12 @@ class SetPositionDialog(QDialog):
         apply_rec_btn.clicked.connect(self._apply_selected_record)
         del_btn = QPushButton("Delete")
         del_btn.clicked.connect(self._delete_selected_record)
+        reset_btn = QPushButton("Reset Records")
+        reset_btn.clicked.connect(self._reset_records)
         rec_row.addWidget(load_btn)
         rec_row.addWidget(apply_rec_btn)
         rec_row.addWidget(del_btn)
+        rec_row.addWidget(reset_btn)
         rec_layout.addLayout(rec_row)
         layout.addWidget(rec_box, 1)
 
@@ -1619,6 +2281,7 @@ class SetPositionDialog(QDialog):
             load_btn,
             apply_rec_btn,
             del_btn,
+            reset_btn,
         ]
         self.refresh_records()
 
@@ -1633,12 +2296,14 @@ class SetPositionDialog(QDialog):
         fn: Callable[[_ServoActionWorker, Any], Any],
         on_completed: Callable[[object], None],
         busy_message: str,
+        *,
+        hold_torque: bool | None = None,
     ) -> None:
         if self._busy:
             return
         self._set_busy(True, busy_message)
         self._thread = QThread()
-        self._worker = _ServoActionWorker(self._config, fn)
+        self._worker = _ServoActionWorker(self._config, fn, hold_torque=hold_torque)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.completed.connect(on_completed)
@@ -1661,7 +2326,7 @@ class SetPositionDialog(QDialog):
         def fn(_worker: _ServoActionWorker, controller: Any) -> Any:
             return list(controller.read_positions())
 
-        self._start_worker(fn, self._on_read_done, "Reading…")
+        self._start_worker(fn, self._on_read_done, "Servo: reading positions…")
 
     @pyqtSlot(object)
     def _on_read_done(self, positions: object) -> None:
@@ -1669,7 +2334,7 @@ class SetPositionDialog(QDialog):
         for sid, pos in zip(self._servo_ids, positions):
             if sid in self._spins:
                 self._spins[sid].setValue(int(pos))
-        self._status.setText(f"Read {len(positions)} position(s).")
+        self._status.setText(f"Servo: read {len(positions)} position(s).")
 
     def _do_apply(self) -> None:
         target = [int(self._spins[sid].value()) for sid in self._servo_ids]
@@ -1678,15 +2343,18 @@ class SetPositionDialog(QDialog):
             controller.set_positions(target)
             return None
 
-        self._start_worker(fn, self._on_apply_done, "Applying…")
+        # Keep torque enabled after disconnect so goal positions actually move.
+        self._start_worker(
+            fn, self._on_apply_done, "Servo: applying…", hold_torque=True
+        )
 
     @pyqtSlot(object)
     def _on_apply_done(self, _result: object) -> None:
-        self._status.setText("Applied.")
+        self._status.setText("Servo: applied.")
 
     @pyqtSlot(str)
     def _on_failed(self, message: str) -> None:
-        self._status.setText(message)
+        self._status.setText(f"Servo error: {message}")
         QMessageBox.warning(self, "Servo action failed", message)
 
     def _save_record(self) -> None:
@@ -1711,11 +2379,23 @@ class SetPositionDialog(QDialog):
         if self._save_callback:
             self._save_callback()
 
-    def _selected_record(self) -> dict[str, Any] | None:
-        row = self._record_list.currentRow()
-        if row < 0 or row >= len(self._records):
+    def _selected_record_index(self) -> int | None:
+        item = self._record_list.currentItem()
+        if item is None:
             return None
-        return self._records[row]
+        try:
+            idx = int(item.data(Qt.ItemDataRole.UserRole))
+        except (TypeError, ValueError):
+            return None
+        if idx < 0 or idx >= len(self._records):
+            return None
+        return idx
+
+    def _selected_record(self) -> dict[str, Any] | None:
+        idx = self._selected_record_index()
+        if idx is None:
+            return None
+        return self._records[idx]
 
     def _load_selected_record(self) -> None:
         rec = self._selected_record()
@@ -1726,7 +2406,7 @@ class SetPositionDialog(QDialog):
             val = positions.get(str(sid))
             if val is not None:
                 self._spins[sid].setValue(int(val))
-        self._status.setText(f"Loaded '{rec.get('name', '')}'.")
+        self._status.setText(f"Record: loaded '{rec.get('name', '')}'.")
 
     def _apply_selected_record(self) -> None:
         rec = self._selected_record()
@@ -1736,11 +2416,35 @@ class SetPositionDialog(QDialog):
         self._do_apply()
 
     def _delete_selected_record(self) -> None:
-        row = self._record_list.currentRow()
-        if row < 0 or row >= len(self._records):
+        idx = self._selected_record_index()
+        if idx is None:
             return
-        del self._records[row]
+        del self._records[idx]
         self.refresh_records()
+        if self._save_callback:
+            self._save_callback()
+
+    def _reset_records(self) -> None:
+        if not self._records:
+            self._status.setText("Records: none to reset.")
+            return
+        confirm = QMessageBox(self)
+        confirm.setIcon(QMessageBox.Icon.Warning)
+        confirm.setWindowTitle("Reset records")
+        confirm.setText("Delete all saved position records?")
+        confirm.setInformativeText(
+            "This cannot be undone. Current goal position values are not changed."
+        )
+        confirm.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        confirm.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if confirm.exec() != QMessageBox.StandardButton.Yes:
+            return
+        count = len(self._records)
+        self._records.clear()
+        self.refresh_records()
+        self._status.setText(f"Records: reset {count} record(s).")
         if self._save_callback:
             self._save_callback()
 
@@ -1759,8 +2463,10 @@ class FicopMainWindow(QMainWindow):
         self._debug_worker: _ServoActionWorker | None = None
         self._set_dialog: SetPositionDialog | None = None
         self._read_dialog: ReadPositionsDialog | None = None
+        self._channel_dialog: ReadChannelDialog | None = None
         self._connected_preview = False
         self._optimization_running = False
+        self._logger_session_active = False
 
         self._build_toolbar()
         self._build_ui()
@@ -1919,10 +2625,13 @@ class FicopMainWindow(QMainWindow):
         self._channel_name_label.setStyleSheet("color: gray;")
         name_btn = QPushButton("Name…")
         name_btn.clicked.connect(self._rename_current_channel)
+        self._read_value_btn = QPushButton("Read value")
+        self._read_value_btn.clicked.connect(self._read_channel_value)
         channel_row = QHBoxLayout()
         channel_row.addWidget(self._logger_channel)
         channel_row.addWidget(self._channel_name_label, 1)
         channel_row.addWidget(name_btn)
+        channel_row.addWidget(self._read_value_btn)
         channel_widget = QWidget()
         channel_widget.setLayout(channel_row)
         layout.addRow("Type", self._logger_style)
@@ -1933,12 +2642,8 @@ class FicopMainWindow(QMainWindow):
     def _refresh_channel_label(self) -> None:
         if not hasattr(self, "_channel_name_label"):
             return
-        lc = self._config["logger"]
-        style = str(lc.get("style", "dummy"))
         ch = int(self._logger_channel.value())
-        names = lc.get("channel_names", {}).get(style, {}) or {}
-        nick = str(names.get(str(ch), "")).strip()
-        self._channel_name_label.setText(f"({nick})" if nick else "")
+        self._channel_name_label.setText(_channel_label(self._config, ch))
 
     def _rename_current_channel(self) -> None:
         lc = self._config["logger"]
@@ -1963,7 +2668,26 @@ class FicopMainWindow(QMainWindow):
         else:
             per_style.pop(str(ch), None)
         self._refresh_channel_label()
+        self._refresh_optimizer_list()
         _save_config(self._config)
+
+    def _read_channel_value(self) -> None:
+        if self._optimization_running or self._opt_thread is not None:
+            QMessageBox.warning(self, "Busy", "Stop optimization first.")
+            return
+        self._save_from_controls()
+        self._logger_session_active = True
+        was_run_enabled = self._run_button.isEnabled()
+        self._run_button.setEnabled(False)
+        dialog = ReadChannelDialog(self._config, self)
+        self._channel_dialog = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._channel_dialog = None
+            self._logger_session_active = False
+            if not self._optimization_running:
+                self._run_button.setEnabled(was_run_enabled)
 
     def _build_optimizer_group(self) -> QGroupBox:
         group = QGroupBox("Optimization")
@@ -2019,6 +2743,7 @@ class FicopMainWindow(QMainWindow):
         layout.addWidget(QLabel("Steps"))
         self._opt_list = QListWidget()
         self._opt_list.setMinimumHeight(220)
+        self._opt_list.itemChanged.connect(self._on_optimization_checked)
         layout.addWidget(self._opt_list, 1)
         row = QHBoxLayout()
         add = QPushButton("Add")
@@ -2082,27 +2807,15 @@ class FicopMainWindow(QMainWindow):
         self._plot_widget.getAxis("bottom").enableAutoSIPrefix(False)
         self._merit_unit = ""
         self._legend = self._plot_widget.addLegend(offset=(10, 10))
-        self._curve_sample = self._plot_widget.plot(
-            [],
-            [],
-            pen=pg.mkPen(color=(120, 180, 255), width=1),
-            symbol="o",
-            symbolSize=4,
-            symbolBrush=(120, 180, 255, 150),
-            symbolPen=None,
-            name="value",
-        )
-        self._curve_best = self._plot_widget.plot(
-            [],
-            [],
-            pen=pg.mkPen(color=(255, 170, 80), width=2),
-            name="best",
-        )
+        self._channel_curves: dict[int, Any] = {}
+        self._channel_best_curves: dict[int, Any] = {}
+        self._channel_plot_data: dict[int, tuple[list[int], list[float]]] = {}
+        self._channel_best_plot_data: dict[int, tuple[list[int], list[float]]] = {}
         self._plot_best_label = pg.TextItem(anchor=(1, 0))
         self._plot_widget.addItem(self._plot_best_label)
         self._plot_xs: list[int] = []
         self._plot_ys: list[float] = []
-        self._plot_best: list[float] = []
+        self._plot_best_by_channel: dict[int, float] = {}
         plot_layout.addWidget(self._plot_widget)
         self._best_label = QLabel("Best: —    Last: —    Samples: 0")
         plot_layout.addWidget(self._best_label)
@@ -2120,9 +2833,21 @@ class FicopMainWindow(QMainWindow):
     def _reset_progress_plot(self) -> None:
         self._plot_xs = []
         self._plot_ys = []
-        self._plot_best = []
-        self._curve_sample.setData([], [])
-        self._curve_best.setData([], [])
+        self._plot_best_by_channel = {}
+        curves = list(getattr(self, "_channel_curves", {}).values())
+        curves += list(getattr(self, "_channel_best_curves", {}).values())
+        for curve in curves:
+            self._plot_widget.removeItem(curve)
+        self._channel_curves = {}
+        self._channel_best_curves = {}
+        self._channel_plot_data = {}
+        self._channel_best_plot_data = {}
+        if (
+            hasattr(self, "_legend")
+            and self._legend is not None
+            and hasattr(self._legend, "clear")
+        ):
+            self._legend.clear()
         self._plot_best_label.setText("")
         self._best_label.setText("Best: —    Last: —    Samples: 0")
         for region in list(getattr(self, "_stage_regions", [])):
@@ -2145,8 +2870,6 @@ class FicopMainWindow(QMainWindow):
                 "muted": QColor(140, 140, 140),
                 "grid_alpha": 0.25,
                 "legend_brush": pg.mkBrush(0, 0, 0, 90),
-                "sample": (120, 180, 255),
-                "best": (255, 170, 80),
             }
         return {
             "bg": bg,
@@ -2154,9 +2877,54 @@ class FicopMainWindow(QMainWindow):
             "muted": QColor(110, 110, 110),
             "grid_alpha": 0.35,
             "legend_brush": pg.mkBrush(255, 255, 255, 200),
-            "sample": (30, 110, 200),
-            "best": (210, 110, 30),
         }
+
+    def _channel_plot_color(self, channel: int) -> tuple[int, int, int]:
+        return CHANNEL_PLOT_COLORS[(int(channel) - 1) % len(CHANNEL_PLOT_COLORS)]
+
+    def _style_channel_curves(self, channel: int) -> None:
+        color = self._channel_plot_color(channel)
+        value_curve = self._channel_curves.get(channel)
+        if value_curve is not None:
+            value_curve.setPen(pg.mkPen(color=color, width=1.4))
+            value_curve.setSymbolBrush((*color, 160))
+            value_curve.setSymbolPen(None)
+        best_curve = self._channel_best_curves.get(channel)
+        if best_curve is not None:
+            best_curve.setPen(
+                pg.mkPen(color=color, width=2.4, style=Qt.PenStyle.DashLine)
+            )
+
+    def _ensure_channel_curves(self, channel: int) -> tuple[Any, Any]:
+        channel = int(channel)
+        color = self._channel_plot_color(channel)
+        value_curve = self._channel_curves.get(channel)
+        if value_curve is None:
+            label = _channel_label(self._config, channel)
+            value_curve = self._plot_widget.plot(
+                [],
+                [],
+                pen=pg.mkPen(color=color, width=1.4),
+                symbol="o",
+                symbolSize=5,
+                symbolBrush=(*color, 160),
+                symbolPen=None,
+                name=f"{label} value",
+                connect="finite",
+            )
+            self._channel_curves[channel] = value_curve
+        best_curve = self._channel_best_curves.get(channel)
+        if best_curve is None:
+            label = _channel_label(self._config, channel)
+            best_curve = self._plot_widget.plot(
+                [],
+                [],
+                pen=pg.mkPen(color=color, width=2.4, style=Qt.PenStyle.DashLine),
+                name=f"{label} best",
+                connect="finite",
+            )
+            self._channel_best_curves[channel] = best_curve
+        return value_curve, best_curve
 
     def _apply_plot_theme(self) -> None:
         if not hasattr(self, "_plot_widget"):
@@ -2172,14 +2940,11 @@ class FicopMainWindow(QMainWindow):
         if hasattr(self, "_legend") and self._legend is not None:
             self._legend.setBrush(theme["legend_brush"])
             self._legend.setLabelTextColor(theme["fg"])
-        self._curve_sample.setPen(pg.mkPen(color=theme["sample"], width=1))
-        self._curve_sample.setSymbolBrush((*theme["sample"], 150))
-        self._curve_best.setPen(pg.mkPen(color=theme["best"], width=2))
+        for channel in getattr(self, "_channel_curves", {}):
+            self._style_channel_curves(channel)
         self._plot_best_label.setColor(theme["fg"])
         for line in getattr(self, "_stage_regions", []):
-            line.setPen(
-                pg.mkPen(color=theme["muted"], style=Qt.PenStyle.DashLine)
-            )
+            line.setPen(pg.mkPen(color=theme["muted"], style=Qt.PenStyle.DashLine))
 
     def _unit_suffix(self) -> str:
         return f" {self._merit_unit}" if self._merit_unit else ""
@@ -2192,24 +2957,32 @@ class FicopMainWindow(QMainWindow):
     @pyqtSlot(str)
     def _apply_merit_unit(self, unit: str) -> None:
         self._merit_unit = (unit or "").strip()
-        self._plot_widget.setLabel(
-            "left", "Merit", units=self._merit_unit or None
-        )
+        self._plot_widget.setLabel("left", "Merit", units=self._merit_unit or None)
         self._value_threshold.setSuffix(self._unit_suffix())
 
-    @pyqtSlot(int, float, float)
-    def _on_sample(self, index: int, value: float, best: float) -> None:
+    @pyqtSlot(int, float, float, int)
+    def _on_sample(self, index: int, value: float, best: float, channel: int) -> None:
+        channel = int(channel)
         self._plot_xs.append(int(index))
         self._plot_ys.append(float(value))
-        self._plot_best.append(float(best))
-        self._curve_sample.setData(self._plot_xs, self._plot_ys)
-        self._curve_best.setData(self._plot_xs, self._plot_best)
+        self._plot_best_by_channel[channel] = float(best)
+        xs, ys = self._channel_plot_data.setdefault(channel, ([], []))
+        xs.append(int(index))
+        ys.append(float(value))
+        best_xs, best_ys = self._channel_best_plot_data.setdefault(channel, ([], []))
+        best_xs.append(int(index))
+        best_ys.append(float(best))
+        value_curve, best_curve = self._ensure_channel_curves(channel)
+        value_curve.setData(xs, ys)
+        best_curve.setData(best_xs, best_ys)
+        channel_label = _channel_label(self._config, channel)
         best_text = self._format_merit(best)
         last_text = self._format_merit(value)
         self._best_label.setText(
-            f"Best: {best_text}    Last: {last_text}    Samples: {index}"
+            f"Best {channel_label}: {best_text}    "
+            f"Last {channel_label}: {last_text}    Samples: {index}"
         )
-        self._plot_best_label.setText(f"best = {best_text}")
+        self._plot_best_label.setText(f"{channel_label} best = {best_text}")
         self._plot_best_label.setPos(index, best)
 
     @pyqtSlot(int, str)
@@ -2226,6 +2999,7 @@ class FicopMainWindow(QMainWindow):
         if not hasattr(self, "_stage_regions"):
             self._stage_regions = []
         self._stage_regions.append(line)
+        self._append_log(f"Step: {stage_index + 1}. {name}")
 
     def _open_settings(self) -> None:
         dialog = SettingsDialog(self._config, self)
@@ -2324,6 +3098,7 @@ class FicopMainWindow(QMainWindow):
         self._max_pos.blockSignals(False)
         self._wait_value.blockSignals(False)
         self._verbose.blockSignals(False)
+        self._refresh_channel_label()
 
     def _refresh_servo_list(self) -> None:
         self._servo_list.clear()
@@ -2345,12 +3120,38 @@ class FicopMainWindow(QMainWindow):
             self._pair_list.addItem(item)
 
     def _refresh_optimizer_list(self) -> None:
+        self._opt_list.blockSignals(True)
         self._opt_list.clear()
         for idx, item in enumerate(self._config["optimizer"].get("items", []), start=1):
             label = self._optimizer_label(idx, item)
             list_item = QListWidgetItem(label)
             list_item.setData(Qt.ItemDataRole.UserRole, item)
+            list_item.setFlags(list_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            list_item.setCheckState(
+                Qt.CheckState.Checked
+                if _optimizer_enabled(item)
+                else Qt.CheckState.Unchecked
+            )
+            if not _optimizer_enabled(item):
+                list_item.setForeground(QBrush(QColor(140, 140, 140)))
             self._opt_list.addItem(list_item)
+        self._opt_list.blockSignals(False)
+
+    def _on_optimization_checked(self, list_item: QListWidgetItem) -> None:
+        row = self._opt_list.row(list_item)
+        items = self._config["optimizer"].get("items", [])
+        if row < 0 or row >= len(items):
+            return
+        items[row]["enabled"] = list_item.checkState() == Qt.CheckState.Checked
+        was_blocked = self._opt_list.blockSignals(True)
+        try:
+            if _optimizer_enabled(items[row]):
+                list_item.setForeground(QBrush())
+            else:
+                list_item.setForeground(QBrush(QColor(140, 140, 140)))
+        finally:
+            self._opt_list.blockSignals(was_blocked)
+        _save_config(self._config)
 
     def _servo_short_label(self, sid: int) -> str:
         """Compact servo label for the optimizer list: nickname if set, else 'ID N'."""
@@ -2358,7 +3159,7 @@ class FicopMainWindow(QMainWindow):
         name = str(names.get(str(sid), "")).strip()
         return name if name else f"ID {sid}"
 
-    def _optimizer_label(self, idx: int, item: dict[str, Any]) -> str:
+    def _optimizer_label(self, _idx: int, item: dict[str, Any]) -> str:
         name = str(item.get("name") or item.get("type"))
         opt_type = str(item.get("type"))
         if opt_type == "manual":
@@ -2393,7 +3194,8 @@ class FicopMainWindow(QMainWindow):
             detail = "pairs: " + (", ".join(labels) if labels else "—")
         else:
             detail = "custom arguments"
-        return f"{idx}. {name} - {detail}"
+        ch = int(item.get("channel", self._config["logger"].get("channel", 1)))
+        return f"{name} — {_channel_label(self._config, ch)} — {detail}"
 
     def _servo_label(self, sid: int) -> str:
         names = self._config["scservo"].get("servo_names", {})
@@ -2410,6 +3212,7 @@ class FicopMainWindow(QMainWindow):
         self._refresh_logger_devices()
         self._sync_logger_constraints()
         self._save_from_controls()
+        self._refresh_optimizer_list()
 
     def _sync_logger_constraints(self) -> None:
         is_dummy_controller = self._config["scservo"].get("port") == DUMMY_PORT
@@ -2721,8 +3524,11 @@ class FicopMainWindow(QMainWindow):
             and self._config["scservo"].get("port") != DUMMY_PORT
         ):
             problems.append("Dummy logger requires the dummy controller.")
-        if not self._config["optimizer"].get("items"):
+        opt_items = self._config["optimizer"].get("items", [])
+        if not opt_items:
             problems.append("Add at least one optimization step.")
+        elif not any(_optimizer_enabled(item) for item in opt_items):
+            problems.append("Enable at least one optimization step.")
         if problems:
             self._connected_preview = False
             QMessageBox.warning(self, "Setup", "\n".join(problems))
@@ -2738,6 +3544,13 @@ class FicopMainWindow(QMainWindow):
             self._run_optimization()
 
     def _run_optimization(self) -> None:
+        if self._logger_session_active:
+            QMessageBox.warning(
+                self,
+                "Logger connected",
+                "Close the channel value window before running optimization.",
+            )
+            return
         self._save_from_controls()
         self._check_setup()
         if not self._connected_preview or self._opt_thread is not None:
@@ -2806,7 +3619,7 @@ class FicopMainWindow(QMainWindow):
         self._optimization_running = False
         self._set_debug_buttons_enabled(True)
         self._run_status.setText("Failed")
-        self._append_log(message)
+        self._append_log(f"Optimization error: {message}")
         QMessageBox.critical(self, "Optimization failed", message)
 
     @pyqtSlot()
@@ -2820,10 +3633,21 @@ class FicopMainWindow(QMainWindow):
 
     @pyqtSlot(str)
     def _append_log(self, message: str) -> None:
-        self._log.append(message.rstrip())
+        text = message.strip()
+        if not text:
+            return
+        if set(text) == {"="}:
+            return
+        if text.startswith("Starting ") and text.endswith("..."):
+            return
+        if text.startswith("manual:"):
+            text = "Manual: " + text[len("manual:") :].strip()
+        elif text.startswith("two-knob:"):
+            text = "Two-knob: " + text[len("two-knob:") :].strip()
+        self._log.append(text)
 
     def _set_debug_buttons_enabled(self, enabled: bool) -> None:
-        for attr in ("_shiver_btn", "_read_pos_btn", "_set_pos_btn"):
+        for attr in ("_shiver_btn", "_read_pos_btn", "_set_pos_btn", "_read_value_btn"):
             btn = getattr(self, attr, None)
             if btn is not None:
                 btn.setEnabled(enabled)
@@ -2832,7 +3656,7 @@ class FicopMainWindow(QMainWindow):
         self,
         fn: Callable[[_ServoActionWorker, Any], Any],
         on_completed: Callable[[object], None],
-        busy_message: str,
+        _busy_message: str,
     ) -> bool:
         if self._optimization_running:
             QMessageBox.warning(self, "Busy", "Stop optimization first.")
@@ -2845,7 +3669,6 @@ class FicopMainWindow(QMainWindow):
             return False
         self._save_from_controls()
         self._set_debug_buttons_enabled(False)
-        self._append_log(busy_message)
         self._debug_thread = QThread()
         self._debug_worker = _ServoActionWorker(self._config, fn)
         self._debug_worker.moveToThread(self._debug_thread)
@@ -2872,7 +3695,7 @@ class FicopMainWindow(QMainWindow):
 
     @pyqtSlot(str)
     def _on_debug_failed(self, message: str) -> None:
-        self._append_log(message)
+        self._append_log(f"Servo error: {message}")
         QMessageBox.warning(self, "Servo action failed", message)
 
     def _shiver_selected_servo(self) -> None:
@@ -2912,7 +3735,7 @@ class FicopMainWindow(QMainWindow):
 
     @pyqtSlot(object)
     def _on_shiver_done(self, sid: object) -> None:
-        self._append_log(f"Shiver finished (ID {sid}).")
+        self._append_log(f"Servo: shiver finished (ID {sid}).")
 
     def _read_positions(self) -> None:
         sc = self._config["scservo"]
@@ -2958,6 +3781,8 @@ class FicopMainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         _save_config(self._config)
+        if self._channel_dialog is not None:
+            self._channel_dialog.reject()
         for thread in (self._scan_thread, self._opt_thread, self._debug_thread):
             if thread is not None and thread.isRunning():
                 thread.quit()

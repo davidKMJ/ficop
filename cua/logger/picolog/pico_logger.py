@@ -15,6 +15,15 @@ PL1000_CHANNEL_MIN = 1
 PL1000_CHANNEL_MAX = 16
 
 
+def _pl1000_channel_key(channel: int) -> str:
+    ch = int(channel)
+    if ch < PL1000_CHANNEL_MIN or ch > PL1000_CHANNEL_MAX:
+        raise ValueError(
+            f"PicoLog channel must be in {PL1000_CHANNEL_MIN}..{PL1000_CHANNEL_MAX}, got {ch}"
+        )
+    return f"PL1000_CHANNEL_{ch}"
+
+
 class PicoLogger(BaseLogger):
     """
     PicoLog PL-1000 style logger: connect to a PicoLog and read values from it.
@@ -23,7 +32,6 @@ class PicoLogger(BaseLogger):
     def __init__(
         self,
         device_name: Optional[str] = None,
-        channel: Optional[int] = None,
         input_range_mv: int = INPUT_RANGE_MV_DEFAULT,
         stream_samples_per_channel: int = 1_000,
         stream_us_per_block: int = 1_000_000,
@@ -33,14 +41,11 @@ class PicoLogger(BaseLogger):
 
         Args:
             device_name: The name of the PicoLog device to connect to.
-            channel: The 1-based input channel to read (same convention as ``Oscilloscope``).
-                If ``None``, channel 1 is used.
             input_range_mv: The input range in millivolts.
             stream_samples_per_channel: The number of samples per channel to stream.
             stream_us_per_block: The time in microseconds per block to stream.
         """
         super().__init__(device_name)
-        self._channel = channel
         self._input_range_mv = input_range_mv
         self._stream_n_samples = stream_samples_per_channel
         self._stream_us_per_block = stream_us_per_block
@@ -48,21 +53,10 @@ class PicoLogger(BaseLogger):
         self._max_adc = ctypes.c_uint16()
         self._pl = None
         self._streaming = False
+        self._stream_channel: Optional[int] = None
         self._stream_values: Optional[ctypes.Array] = None
         self._stream_overflow = ctypes.c_uint16()
         self._stream_trigger_index = ctypes.c_uint32(0)
-
-    @property
-    def _effective_channel(self) -> int:
-        return self._channel if self._channel is not None else 1
-
-    def _pl1000_channel_dict_key(self) -> str:
-        ch = self._effective_channel
-        if ch < PL1000_CHANNEL_MIN or ch > PL1000_CHANNEL_MAX:
-            raise ValueError(
-                f"PicoLog channel must be in {PL1000_CHANNEL_MIN}..{PL1000_CHANNEL_MAX}, got {ch}"
-            )
-        return f"PL1000_CHANNEL_{ch}"
 
     def connect(self) -> None:
         if self._connected:
@@ -80,6 +74,7 @@ class PicoLogger(BaseLogger):
             assert_pico_ok(status["maxValue"])
             self._pl = pl
             self._streaming = False
+            self._stream_channel = None
             self._stream_values = None
             self._connected = True
             print("PicoLogger connected")
@@ -97,6 +92,7 @@ class PicoLogger(BaseLogger):
             if self._streaming:
                 pl.pl1000Stop(self._chandle)
                 self._streaming = False
+            self._stream_channel = None
             self._stream_values = None
             status: dict[str, int] = {}
             status["closeUnit"] = pl.pl1000CloseUnit(self._chandle)
@@ -117,10 +113,14 @@ class PicoLogger(BaseLogger):
 
         assert_pico_ok(self._pl.pl1000Stop(self._chandle))
         self._streaming = False
+        self._stream_channel = None
 
-    def _ensure_streaming(self) -> None:
+    def _ensure_streaming(self, channel: int) -> None:
         if not self._connected:
             raise RuntimeError("PicoLogger not connected")
+        ch = int(channel)
+        if self._streaming and self._stream_channel != ch:
+            self.stop_streaming()
         if self._streaming:
             return
         from picosdk.functions import assert_pico_ok
@@ -129,9 +129,7 @@ class PicoLogger(BaseLogger):
         n_ch = 1
         n_ideal = ctypes.c_uint32(self._stream_n_samples)
         us_for_block = ctypes.c_uint32(self._stream_us_per_block)
-        channels = (ctypes.c_int16 * n_ch)(
-            pl.PL1000Inputs[self._pl1000_channel_dict_key()]
-        )
+        channels = (ctypes.c_int16 * n_ch)(pl.PL1000Inputs[_pl1000_channel_key(ch)])
 
         status: dict[str, int] = {}
         status["setInterval"] = pl.pl1000SetInterval(
@@ -156,8 +154,9 @@ class PicoLogger(BaseLogger):
             sleep(0.001)
 
         self._streaming = True
+        self._stream_channel = ch
 
-    def get_values(self) -> NDArray[np.floating]:
+    def get_values(self, channel: int) -> NDArray[np.floating]:
         """
         Return one block of samples from the streaming buffer.
 
@@ -170,7 +169,7 @@ class PicoLogger(BaseLogger):
             raise RuntimeError("PicoLogger not connected")
         from picosdk.functions import adc2mVpl1000, assert_pico_ok
 
-        self._ensure_streaming()
+        self._ensure_streaming(channel)
         pl = self._pl
         assert self._stream_values is not None
         chunk = self._stream_n_samples
@@ -196,7 +195,7 @@ class PicoLogger(BaseLogger):
         time_ms = np.arange(n, dtype=np.float64) * dt_ms
         return np.stack([time_ms, mvs.astype(np.float64)])
 
-    def get_current_value(self) -> Tuple[Number, Optional[str]]:
+    def get_current_value(self, channel: int) -> Tuple[Number, Optional[str]]:
         if not self._connected:
             raise RuntimeError("PicoLogger not connected")
         if self._streaming:
@@ -206,10 +205,11 @@ class PicoLogger(BaseLogger):
         from picosdk.functions import assert_pico_ok
 
         pl = self._pl
+        key = _pl1000_channel_key(channel)
         raw = ctypes.c_uint16()
         st = pl.pl1000GetSingle(
             self._chandle,
-            pl.PL1000Inputs[self._pl1000_channel_dict_key()],
+            pl.PL1000Inputs[key],
             ctypes.byref(raw),
         )
         assert_pico_ok(st)

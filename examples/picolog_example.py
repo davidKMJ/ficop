@@ -16,10 +16,10 @@ def example_single_value() -> None:
     print("Example 1: single-shot readings")
     print("=" * 60)
 
-    pico = PicoLogger(channel=CHANNEL, input_range_mv=INPUT_RANGE_MV)
+    pico = PicoLogger(input_range_mv=INPUT_RANGE_MV)
     with pico:
         for i in range(5):
-            value, unit = pico.get_current_value()
+            value, unit = pico.get_current_value(CHANNEL)
             print(f"  sample {i}: {value:.2f} {unit}")
 
 
@@ -30,14 +30,13 @@ def example_streaming_block() -> None:
     print("=" * 60)
 
     pico = PicoLogger(
-        channel=CHANNEL,
         input_range_mv=INPUT_RANGE_MV,
         stream_samples_per_channel=STREAM_SAMPLES_PER_BLOCK,
         stream_us_per_block=STREAM_US_PER_BLOCK,
     )
     pico.connect()
     try:
-        block = pico.get_values()
+        block = pico.get_values(CHANNEL)
         time_ms, mv = block[0], block[1]
         print(f"  got {len(mv)} samples ({mv.min():.1f}..{mv.max():.1f} mV)")
 
@@ -60,8 +59,9 @@ def example_plot_stream() -> None:
     print("Example 3: live plot of single-shot readings")
     print("=" * 60)
 
-    pico = PicoLogger(channel=CHANNEL, input_range_mv=INPUT_RANGE_MV)
+    pico = PicoLogger(input_range_mv=INPUT_RANGE_MV)
     pico.plot_stream(
+        CHANNEL,
         log=True,
         log_path="picolog_run.txt",
         update_interval_s=0.05,

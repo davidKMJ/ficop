@@ -21,21 +21,21 @@
       4
     ],
     "servo_names": {
-      "1": "Servo 1",
-      "2": "Servo 2",
-      "3": "Servo 3",
-      "4": "Servo 4"
+      "1": "",
+      "2": "",
+      "3": "",
+      "4": ""
     },
     "pairs": [
       {
         "a": 1,
         "b": 2,
-        "name": "Pair 1"
+        "name": ""
       },
       {
         "a": 3,
         "b": 4,
-        "name": "Pair 2"
+        "name": ""
       }
     ],
     "shiver_amplitude": 100,
@@ -50,16 +50,19 @@
       "oscilloscope": "ASRL1::INSTR"
     },
     "channel_names": {
-      "dummy": {
-        "1": "Main"
-      },
+      "dummy": {},
+      "picolog": {},
+      "oscilloscope": {}
+    },
+    "value_records": {
+      "dummy": {},
       "picolog": {},
       "oscilloscope": {}
     },
     "dummy": {
-      "center": "-180, -150, 150, 150",
+      "center": "0, 0, 0, 0",
       "sigma": "100",
-      "noise": 0.02,
+      "noise": 0.001,
       "unit": ""
     },
     "picolog": {
@@ -83,11 +86,11 @@
   },
   "optimizer": {
     "base": {
-      "min_position": -15000,
-      "max_position": 15000,
+      "min_position": 0,
+      "max_position": 4095,
       "position_threshold": 5,
       "position_timeout": 5.0,
-      "wait_for_value": 0.01,
+      "wait_for_value": 0.1,
       "value_threshold": -1e+100,
       "verbose": true,
       "restore_on_stop": true
@@ -95,7 +98,9 @@
     "items": [
       {
         "type": "manual",
+        "enabled": false,
         "name": "Coarse manual sweep",
+        "channel": 1,
         "args": {
           "iterations": 1,
           "margin": 500,
@@ -113,9 +118,11 @@
       },
       {
         "type": "two_knob",
+        "enabled": true,
         "name": "Two-knob walk",
+        "channel": 1,
         "args": {
-          "iterations": 10,
+          "iterations": 5,
           "step": 5,
           "direction_update_interval": 5,
           "no_update_count_threshold": 10
@@ -133,14 +140,16 @@
       },
       {
         "type": "manual",
+        "enabled": true,
         "name": "Fine manual sweep",
+        "channel": 1,
         "args": {
           "iterations": 5,
           "margin": 50,
-          "step": 4,
+          "step": 2,
           "margin_decay": 1.0,
           "no_update_count_early_stop": true,
-          "no_update_count_threshold": 5
+          "no_update_count_threshold": 10
         },
         "servo_ids": [
           1,

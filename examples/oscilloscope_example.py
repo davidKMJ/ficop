@@ -17,11 +17,11 @@ def example_single_waveform() -> None:
     print("Example 1: read a single waveform")
     print("=" * 60)
 
-    osc = Oscilloscope(device_name=DEVICE_NAME, channel=CHANNEL, auto_configure=True)
+    osc = Oscilloscope(device_name=DEVICE_NAME, auto_configure=True)
     osc.connect(verbose=True)
     try:
         print(f"Sample rate: {osc.get_sample_rate()} Sa/s")
-        t_s, y = osc.read_values_with_time(channel=CHANNEL)
+        t_s, y = osc.read_values_with_time(CHANNEL)
         print(f"Captured {len(y)} samples (mean = {float(np.mean(y)):.2f})")
 
         plt.figure()
@@ -41,10 +41,10 @@ def example_periodic_samples() -> None:
     print("Example 2: periodic single-value sampling")
     print("=" * 60)
 
-    with Oscilloscope(device_name=DEVICE_NAME, channel=CHANNEL) as osc:
+    with Oscilloscope(device_name=DEVICE_NAME) as osc:
         t0 = time.perf_counter()
         while time.perf_counter() - t0 < 3.0:
-            value, unit = osc.get_current_value()
+            value, unit = osc.get_current_value(CHANNEL)
             udisp = f" {unit}" if unit else ""
             print(f"  t={time.perf_counter() - t0:5.2f}s  value={value:.2f}{udisp}")
             time.sleep(0.25)
@@ -56,8 +56,9 @@ def example_plot_stream() -> None:
     print("Example 3: live plot (press Q in the plot window to stop)")
     print("=" * 60)
 
-    osc = Oscilloscope(device_name=DEVICE_NAME, channel=CHANNEL)
+    osc = Oscilloscope(device_name=DEVICE_NAME)
     osc.plot_stream(
+        CHANNEL,
         log=False,
         update_interval_s=0.05,
         max_plot_points=2000,
